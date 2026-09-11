@@ -8,6 +8,7 @@ import time
 import uuid
 
 import redis.asyncio as redis
+import redis.exceptions
 from fastapi import HTTPException, Request
 from fastapi.responses import Response
 
@@ -57,10 +58,17 @@ async def sliding_window_allow(
     pipeline.zcard(key)
     # Set expiration
     pipeline.expire(key, window_seconds)
-    
-    results = await pipeline.execute()
+
+    try:
+        results = pipeline.execute()
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
+        # Redis is unreachable (network down, DNS failure, timeout, etc.)
+        # Fail open: allow the request rather than blocking all traffic
+        logger.warning("Redis connection failed, rate limiting disabled")
+        return True
+
     current_count = results[2]  # zcard result
-    
+
     return current_count <= limit
 
 async def rate_limit_middleware(request: Request, call_next):

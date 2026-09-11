@@ -3,11 +3,9 @@
 User model representing platform users (buyers, merchants, admins).
 """
 
-from datetime import date
 
-from app.db.base import BaseModel
-from app.db.types import CITEXT
 from enum import Enum as PyEnum
+
 from sqlalchemy import (
     Boolean,
     Column,
@@ -19,6 +17,9 @@ from sqlalchemy import (
     Text,
     text,
 )
+
+from app.db.base import BaseModel
+from app.db.types import CITEXT
 
 
 class UserRole(PyEnum):

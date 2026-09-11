@@ -7,6 +7,9 @@ Handles database operations for catalog using SQLAlchemy.
 
 import json
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.security import to_uuid
 from app.models.category import Category
 from app.models.inventory import Inventory
@@ -23,8 +26,6 @@ from app.schemas.catalog import (
     ProductVariantCreate,
     ProductVariantResponse,
 )
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class CatalogServiceImpl(CatalogService):
@@ -310,16 +311,20 @@ class CatalogServiceImpl(CatalogService):
             query = query.where(Product.status == status)
 
         # Free-text search: match against title, slug, or description
+        # Splits the query into individual words and requires ALL words to match
+        # (AND logic) across title, slug, or description fields.
         if search_query:
             from sqlalchemy import or_
-            search_pattern = f"%{search_query}%"
-            query = query.where(
-                or_(
-                    Product.title.ilike(search_pattern),
-                    Product.slug.ilike(search_pattern),
-                    Product.description.ilike(search_pattern),
+            search_words = [word.strip() for word in search_query.split() if word.strip()]
+            for word in search_words:
+                word_pattern = f"%{word}%"
+                query = query.where(
+                    or_(
+                        Product.title.ilike(word_pattern),
+                        Product.slug.ilike(word_pattern),
+                        Product.description.ilike(word_pattern),
+                    )
                 )
-            )
 
         # Price range filter (on base_price_amount)
         if price_min is not None:

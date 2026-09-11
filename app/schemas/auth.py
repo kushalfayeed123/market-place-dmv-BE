@@ -5,7 +5,6 @@ Pydantic schemas for authentication requests and responses.
 
 from datetime import date, datetime
 from enum import Enum as PyEnum
-from typing import Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -39,17 +38,17 @@ class Gender(str, PyEnum):
 
 class UserRegister(BaseModel):
     email: EmailStr
-    phone: Optional[str] = None
+    phone: str | None = None
     password: str = Field(..., min_length=8)
     role: str = Field(default="buyer", pattern="^(buyer|merchant_owner)$")
 
     # Profile fields
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
-    date_of_birth: Optional[date] = None
+    date_of_birth: date | None = None
     preferred_language: str = Field(default="en", max_length=10)
-    gender: Optional[Gender] = Gender.UNSET
-    avatar_url: Optional[str] = None
+    gender: Gender | None = Gender.UNSET
+    avatar_url: str | None = None
 
 
 class UserUpdate(BaseModel):
@@ -59,13 +58,13 @@ class UserUpdate(BaseModel):
     without resending the full profile.
     """
 
-    first_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    last_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    phone: Optional[str] = None
-    date_of_birth: Optional[date] = None
-    avatar_url: Optional[str] = None
-    preferred_language: Optional[str] = Field(default=None, max_length=10)
-    gender: Optional[Gender] = None
+    first_name: str | None = Field(default=None, min_length=1, max_length=100)
+    last_name: str | None = Field(default=None, min_length=1, max_length=100)
+    phone: str | None = None
+    date_of_birth: date | None = None
+    avatar_url: str | None = None
+    preferred_language: str | None = Field(default=None, max_length=10)
+    gender: Gender | None = None
 
 
 class PasswordChange(BaseModel):
@@ -85,16 +84,16 @@ class UserResponse(BaseModel):
 
     id: str
     email: str
-    phone: Optional[str] = None
+    phone: str | None = None
     role: str
     status: str
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    date_of_birth: Optional[date] = None
-    avatar_url: Optional[str] = None
-    preferred_language: Optional[str] = None
-    gender: Optional[str] = None
-    email_verified_at: Optional[datetime] = None
+    first_name: str | None = None
+    last_name: str | None = None
+    date_of_birth: date | None = None
+    avatar_url: str | None = None
+    preferred_language: str | None = None
+    gender: str | None = None
+    email_verified_at: datetime | None = None
     mfa_enabled: bool = False
     created_at: datetime
     updated_at: datetime
@@ -114,7 +113,7 @@ class RefreshTokenRequest(BaseModel):
 
 
 class MFASetup(BaseModel):
-    secret: Optional[str] = None  # If not provided, one will be generated
+    secret: str | None = None  # If not provided, one will be generated
 
 
 class MFAVerify(BaseModel):
