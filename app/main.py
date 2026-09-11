@@ -47,6 +47,12 @@ if settings.BACKEND_CORS_ORIGINS:
 # Setup rate limiting
 setup_rate_limiting(app)
 
+# Initialize Redis connection for rate limiting
+from app.core.rate_limit import init_redis
+
+# Store the init function to be called during startup
+redis_init_func = init_redis
+
 # Include routers
 app.include_router(auth_router, prefix=f"{settings.API_V1_STR}/auth", tags=["auth"])
 app.include_router(catalog_router, prefix=f"{settings.API_V1_STR}/catalog", tags=["catalog"])
@@ -61,6 +67,12 @@ app.include_router(fulfillment_router, prefix=f"{settings.API_V1_STR}/fulfillmen
 
 # Setup security after routers are included (configures OAuth2 bearer token for Swagger UI)
 setup_security(app)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize Redis connection on startup."""
+    await init_redis(settings.REDIS_URL)
 
 
 @app.get("/")

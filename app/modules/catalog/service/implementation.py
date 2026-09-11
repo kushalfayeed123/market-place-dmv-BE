@@ -265,7 +265,7 @@ class CatalogServiceImpl(CatalogService):
         variants = variants_result.scalars().all()
 
         # Fetch inventory quantities for these variants
-        inventory_quantities = self._inventory_quantities_map(variants)
+        inventory_quantities = await self._inventory_quantities_map(variants)
 
         return self._product_to_response(product, variants, inventory_quantities)
 
@@ -350,7 +350,7 @@ class CatalogServiceImpl(CatalogService):
             all_variants.append(variant)
 
         # Fetch inventory quantities for all variants
-        inventory_quantities = self._inventory_quantities_map(all_variants)
+        inventory_quantities = await self._inventory_quantities_map(all_variants)
 
         return [
             self._product_to_response(product, variants_by_product.get(product.id, []), inventory_quantities)
@@ -624,8 +624,7 @@ class CatalogServiceImpl(CatalogService):
             variants=variant_responses,
         )
 
-    @staticmethod
-    def _inventory_quantities_map(variants: list) -> dict:
+    async def _inventory_quantities_map(self, variants: list) -> dict:
         """Build a {variant_id: quantity_available} map for a list of variants.
 
         Fetches Inventory rows in bulk and joins them to variants. Variants
@@ -636,7 +635,7 @@ class CatalogServiceImpl(CatalogService):
         from app.models.inventory import Inventory
         from sqlalchemy import select
         variant_ids = [v.id for v in variants]
-        result = CatalogServiceImpl._db.execute(
+        result = await self._db.execute(
             select(Inventory).where(Inventory.variant_id.in_(variant_ids))
         )
         by_variant = {row.variant_id: row.quantity_available for row in result.scalars()}

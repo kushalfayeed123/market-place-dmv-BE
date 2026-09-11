@@ -9,9 +9,9 @@ from typing import Dict, Any
 
 class ProductAttributeSchemaCreate(BaseModel):
     category_id: str
-    schema: Dict[str, Any] = Field(..., description="JSON Schema definition for product attributes")
+    json_schema: Dict[str, Any] = Field(..., description="JSON Schema definition for product attributes")
 
 
 class ProductAttributeSchemaResponse(BaseModel):
     category_id: str
-    schema: Dict[str, Any]
+    json_schema: Dict[str, Any]

@@ -3,23 +3,28 @@
 Rate limiting implementation using Redis sliding window counters.
 """
 
+import logging
 import time
 import uuid
-from typing import Optional
+
 import redis.asyncio as redis
-from fastapi import Request, HTTPException
+from fastapi import HTTPException, Request
 from fastapi.responses import Response
-import logging
 
 logger = logging.getLogger(__name__)
 
 # Redis connection will be initialized in setup_rate_limiting
-redis_client: Optional[redis.Redis] = None
+redis_client: redis.Redis | None = None
 
 async def init_redis(redis_url: str):
     """Initialize Redis connection."""
     global redis_client
-    redis_client = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+    redis_client = redis.from_url(
+        redis_url,
+        encoding="utf-8",
+        decode_responses=True,
+        ssl_cert_reqs=None,
+    )
 
 async def sliding_window_allow(
     key: str, 
