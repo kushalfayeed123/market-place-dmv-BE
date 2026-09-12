@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     # Feature Flags
     KYC_ENFORCEMENT_ENABLED: bool = Field(False, env="KYC_ENFORCEMENT_ENABLED")
 
+    # Support notifications (delivered by app/workers/support_notify_worker.py)
+    SUPPORT_WEBHOOK_URL: str = Field("", env="SUPPORT_WEBHOOK_URL")       # empty = webhook disabled
+    SUPPORT_WEBHOOK_SECRET: str = Field("", env="SUPPORT_WEBHOOK_SECRET")  # HMAC-SHA256 signing key
+    SUPPORT_SMTP_HOST: str = Field("", env="SUPPORT_SMTP_HOST")           # empty = email disabled
+    SUPPORT_SMTP_PORT: int = Field(587, env="SUPPORT_SMTP_PORT")
+    SUPPORT_SMTP_USER: str = Field("", env="SUPPORT_SMTP_USER")
+    SUPPORT_SMTP_PASSWORD: str = Field("", env="SUPPORT_SMTP_PASSWORD")
+    SUPPORT_EMAIL_FROM: str = Field("", env="SUPPORT_EMAIL_FROM")
+    SUPPORT_EMAIL_TO: str = Field("", env="SUPPORT_EMAIL_TO")             # comma-separated pickup mailbox(es)
+
     @property
     def is_development(self) -> bool:
         return self.ENVIRONMENT == "development"

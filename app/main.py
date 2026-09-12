@@ -13,6 +13,8 @@ from app.modules.catalog.router import router as catalog_router
 from app.modules.commissions.router import router as commissions_router
 from app.modules.fulfillment.router import router as fulfillment_router
 from app.modules.ledger.router import router as ledger_router
+from app.modules.knowledge.router import router as knowledge_router
+from app.modules.support.router import router as support_router
 from app.modules.merchants.router import router as merchants_router
 from app.modules.orders.router import router as orders_router
 from app.modules.payments.router import router as payments_router
@@ -64,6 +66,8 @@ app.include_router(payments_router, prefix=f"{settings.API_V1_STR}/payments", ta
 app.include_router(product_attributes_router, prefix=f"{settings.API_V1_STR}/product-attribute-schemas", tags=["product-attribute-schemas"])
 app.include_router(ledger_router, prefix=f"{settings.API_V1_STR}/ledger", tags=["ledger"])
 app.include_router(fulfillment_router, prefix=f"{settings.API_V1_STR}/fulfillment", tags=["fulfillment"])
+app.include_router(knowledge_router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["knowledge"])
+app.include_router(support_router, prefix=f"{settings.API_V1_STR}/support", tags=["support"])
 
 # Setup security after routers are included (configures OAuth2 bearer token for Swagger UI)
 setup_security(app)

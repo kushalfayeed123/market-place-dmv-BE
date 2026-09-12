@@ -6,14 +6,13 @@ Handles retry logic for failed webhook processing.
 
 import asyncio
 import logging
-from typing import Optional
+from datetime import datetime, timezone
 
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
 from app.models.webhook_event import WebhookEvent
-from app.modules.payments.router import paystack_webhook  # Reuse webhook handler
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +50,9 @@ class WebhookWorker:
                 query = select(WebhookEvent).where(
                     and_(
                         WebhookEvent.processed_at.is_(None),  # Not yet processed
+                        # Support events are owned by the dedicated support notify
+                        # worker, which actually delivers them (webhook/email).
+                        WebhookEvent.provider != "support",
                         # In a real implementation, we would have a retry count column
                     )
                 ).limit(50)  # Process in batches
@@ -80,7 +82,7 @@ class WebhookWorker:
         # 4. Mark webhook as processed
         
         # For now, we'll just mark it as processed to avoid reprocessing
-        webhook.processed_at = datetime.utcnow()
+        webhook.processed_at = datetime.now(timezone.utc)
         await db.commit()
         
         logger.info(f"Webhook {webhook.id} processed successfully")
