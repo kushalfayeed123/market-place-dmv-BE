@@ -127,6 +127,40 @@ class AuthServiceImpl(AuthService):
         # Create tokens
         return await self._create_token_response(user)
 
+    async def logout(self, user_id: str) -> dict:
+        """
+        Log a user out by revoking all of their active (non-revoked) refresh tokens.
+
+        Access tokens are stateless JWTs and remain valid until they expire,
+        but without a valid refresh token the client cannot obtain a new one.
+
+        Args:
+            user_id: The UUID of the user to log out.
+
+        Returns:
+            Dictionary with a confirmation message.
+        """
+        try:
+            target_uuid = to_uuid(user_id)
+        except ValueError:
+            raise ValueError("User not found")
+
+        result = await self._db.execute(
+            select(RefreshToken).where(
+                RefreshToken.user_id == target_uuid,
+                RefreshToken.revoked_at.is_(None),
+            )
+        )
+        active_tokens = result.scalars().all()
+
+        if active_tokens:
+            now = datetime.now(timezone.utc)
+            for token in active_tokens:
+                token.revoked_at = now
+            await self._db.commit()
+
+        return {"message": "Logged out successfully"}
+
     async def refresh_token(self, refresh_data: RefreshTokenRequest) -> TokenResponse:
         """
         Refresh an access token using a refresh token.

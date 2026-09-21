@@ -58,6 +58,17 @@ class AuthService(ABC):
         Raises:
             ValueError: If credentials are invalid.
         """
+    @abstractmethod
+    async def logout(self, user_id: str) -> dict:
+        """
+        Log the user out by revoking all of their active refresh tokens.
+
+        Args:
+            user_id: The UUID of the user to log out.
+
+        Returns:
+            A dictionary with a confirmation message.
+        """
         ...
 
     @abstractmethod

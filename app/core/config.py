@@ -4,11 +4,13 @@ Application configuration using pydantic-settings.
 Loads settings from environment variables and .env files.
 """
 
+import json
 import secrets
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -52,16 +54,34 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str = Field(default="redis", env="REDIS_PASSWORD")
 
     # CORS
-    BACKEND_CORS_ORIGINS: list[str] = []
+    # NoDecode tells pydantic-settings to hand the raw env/.env value to the
+    # validator below instead of requiring it to be valid JSON (comma-separated
+    # origin lists such as "http://a,http://b" are not valid JSON).
+    BACKEND_CORS_ORIGINS: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
-    def assemble_cors_origins(cls, v: str | list[str]) -> list[str] | str:
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
-            return v
-        raise ValueError(v)
+    def assemble_cors_origins(cls, v: str | list[str] | None) -> list[str]:
+        # Handle None or empty values - return empty list
+        if v is None or v == "":
+            return []
+        # Handle list values - coerce items to str
+        if isinstance(v, list):
+            return [str(item) for item in v]
+        # Handle string values - try to parse as JSON array or split by comma
+        if isinstance(v, str):
+            # Try to parse as JSON array first (handles ["url1", "url2"] format)
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return [str(item) for item in parsed]
+            except (json.JSONDecodeError, ValueError):
+                # If JSON parsing fails, treat as comma-separated string
+                pass
+            # Fall back to comma-separated string split
+            return [i.strip() for i in v.split(",") if i.strip()]
+        # Raise error for unexpected types
+        raise ValueError(f"Invalid BACKEND_CORS_ORIGINS value: {v!r}")
 
     # Paystack
     PAYSTACK_SECRET_KEY: str = Field(..., env="PAYSTACK_SECRET_KEY")

@@ -82,6 +82,20 @@ async def login(
     return response_data
 
 
+@router.post("/logout")
+async def logout(
+    request: Request,
+    current_user: dict = get_current_active_user_depends,
+    service: AuthService = get_auth_service_depends,
+):
+    """
+    Log the current user out by revoking their active refresh tokens.
+    Requires authentication.
+    """
+    return await service.logout(str(current_user.id))
+
+
+@router.post("/refresh", response_model=TokenResponse)
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     request: Request,
