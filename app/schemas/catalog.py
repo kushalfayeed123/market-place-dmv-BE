@@ -40,6 +40,7 @@ class ProductResponse(BaseModel):
     id: str
     merchant_id: str
     store_id: str
+    store_name: str | None = None
     category_id: str | None = None
     title: str
     slug: str

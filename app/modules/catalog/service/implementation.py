@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import to_uuid
 from app.models.category import Category
+from app.models.store import Store
 from app.models.inventory import Inventory
 from app.models.product import Product, ProductStatus
 from app.models.product_attribute_schema import ProductAttributeSchema
@@ -295,7 +296,7 @@ class CatalogServiceImpl(CatalogService):
         Returns:
             List of product responses.
         """
-        query = select(Product)
+        query = select(Product, Store.name.label("store_name")).join(Store, Product.store_id == Store.id)
 
         if merchant_id:
             try:
@@ -577,6 +578,7 @@ class CatalogServiceImpl(CatalogService):
         product: Product,
         variants: list | None = None,
         inventory_quantities: dict | None = None,
+        store_name: str | None = None,
     ) -> ProductResponse:
         """Convert a Product model to ProductResponse schema.
 
@@ -615,6 +617,7 @@ class CatalogServiceImpl(CatalogService):
             id=str(product.id),
             merchant_id=str(product.merchant_id),
             store_id=str(product.store_id),
+            store_name=store_name,
             category_id=str(product.category_id) if product.category_id else None,
             title=product.title,
             slug=product.slug,
