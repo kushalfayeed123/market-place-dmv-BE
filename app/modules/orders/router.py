@@ -8,6 +8,8 @@ Communicates with the service layer via the OrderService abstraction.
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
 from app.core.rate_limit import sliding_window_allow
 from app.core.security import get_current_active_user
+from app.modules.merchants.service.base import MerchantService
+from app.modules.merchants.service.dependency import get_merchant_service
 from app.modules.orders.service.base import OrderService
 from app.modules.orders.service.dependency import get_order_service
 from app.schemas.orders import (
@@ -23,6 +25,7 @@ router = APIRouter()
 get_current_active_user_depends = Depends(get_current_active_user)
 get_idempotency_depends = Depends(get_idempotency_dependency)
 get_order_service_depends = Depends(get_order_service)
+get_merchant_service_depends = Depends(get_merchant_service)
 
 
 @router.post("/checkout", response_model=CheckoutResponse)
@@ -86,16 +89,14 @@ async def get_order(
     order_id: str,
     current_user: dict = get_current_active_user_depends,
     service: OrderService = get_order_service_depends,
+    merchant_service: MerchantService = get_merchant_service_depends,
 ):
     """Get order details by ID."""
     # Determine merchant_id based on user role
     merchant_id = None
     if current_user.role.value == "merchant_owner":
         # Look up merchant by owner_user_id
-        from app.modules.merchants.service.dependency import get_merchant_service
-        from app.modules.merchants.service.implementation import MerchantServiceImpl
-        merchant_service = get_merchant_service()
-        result = await merchant_service.get_merchant(str(current_user.id))
+        result = await merchant_service.get_merchant_by_owner(str(current_user.id))
         if result:
             merchant_id = str(result.id)
     elif current_user.role.value == "merchant_staff":
@@ -124,6 +125,7 @@ async def get_order(
 async def list_orders(
     current_user: dict = get_current_active_user_depends,
     service: OrderService = get_order_service_depends,
+    merchant_service: MerchantService = get_merchant_service_depends,
     skip: int = 0,
     limit: int = 100,
     status: str | None = None,
@@ -133,10 +135,7 @@ async def list_orders(
     merchant_id = None
     if current_user.role.value == "merchant_owner":
         # Look up merchant by owner_user_id
-        from app.modules.merchants.service.dependency import get_merchant_service
-        from app.modules.merchants.service.implementation import MerchantServiceImpl
-        merchant_service = get_merchant_service()
-        result = await merchant_service.get_merchant(str(current_user.id))
+        result = await merchant_service.get_merchant_by_owner(str(current_user.id))
         if result:
             merchant_id = str(result.id)
     elif current_user.role.value == "merchant_staff":
@@ -159,6 +158,7 @@ async def list_merchant_orders(
     merchant_id: str,
     current_user: dict = get_current_active_user_depends,
     service: OrderService = get_order_service_depends,
+    merchant_service: MerchantService = get_merchant_service_depends,
     skip: int = 0,
     limit: int = 100,
     status: str | None = None,
@@ -172,10 +172,7 @@ async def list_merchant_orders(
     merchant_owner_id = None
     if current_user.role.value == "merchant_owner":
         # Look up merchant by owner_user_id
-        from app.modules.merchants.service.dependency import get_merchant_service
-        from app.modules.merchants.service.implementation import MerchantServiceImpl
-        merchant_service = get_merchant_service()
-        merchant = await merchant_service.get_merchant(str(current_user.id))
+        merchant = await merchant_service.get_merchant_by_owner(str(current_user.id))
         if merchant:
             merchant_owner_id = str(merchant.id)
     

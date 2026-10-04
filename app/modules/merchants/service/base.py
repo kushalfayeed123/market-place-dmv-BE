@@ -59,10 +59,23 @@ class MerchantService(ABC):
     async def get_merchant(self, merchant_id: str) -> MerchantResponse | None:
         """
         Get a merchant by ID.
-        
+
         Args:
             merchant_id: The unique identifier of the merchant.
-            
+
+        Returns:
+            The merchant response if found, None otherwise.
+        """
+        ...
+
+    @abstractmethod
+    async def get_merchant_by_owner(self, user_id: str) -> MerchantResponse | None:
+        """
+        Get a merchant by the owner's user ID.
+
+        Args:
+            user_id: The owner's user ID.
+
         Returns:
             The merchant response if found, None otherwise.
         """

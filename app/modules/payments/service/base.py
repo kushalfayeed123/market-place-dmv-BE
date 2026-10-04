@@ -62,16 +62,18 @@ class PaymentService(ABC):
         limit: int = 100,
         order_id: str | None = None,
         status: str | None = None,
+        merchant_id: str | None = None,
     ) -> list[PaymentResponse]:
         """
         List payments with optional filtering.
-        
+
         Args:
             skip: Number of records to skip.
             limit: Maximum number of records to return.
             order_id: Filter by order ID.
             status: Filter by payment status.
-            
+            merchant_id: Filter by merchant (joins through Order → OrderItem).
+
         Returns:
             List of payment responses.
         """

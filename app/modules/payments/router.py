@@ -7,6 +7,8 @@ Communicates with the service layer via the PaymentService abstraction.
 
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
 from app.core.security import get_current_active_user
+from app.modules.merchants.service.base import MerchantService
+from app.modules.merchants.service.dependency import get_merchant_service
 from app.modules.payments.service.base import PaymentService
 from app.modules.payments.service.dependency import get_payment_service
 from app.schemas.payments import (
@@ -17,7 +19,7 @@ from app.schemas.payments import (
     WebhookPayload,
     WebhookResponse,
 )
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 router = APIRouter()
 
@@ -25,6 +27,7 @@ router = APIRouter()
 get_current_active_user_depends = Depends(get_current_active_user)
 get_idempotency_depends = Depends(get_idempotency_dependency)
 get_payment_service_depends = Depends(get_payment_service)
+get_merchant_service_depends = Depends(get_merchant_service)
 
 
 @router.post("/process", response_model=PaymentResponse)
@@ -69,6 +72,40 @@ async def process_payment(
         request, None, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
     )
     return response_data
+
+
+@router.get("/", response_model=list[PaymentResponse])
+async def list_payments(
+    current_user: dict = get_current_active_user_depends,
+    service: PaymentService = get_payment_service_depends,
+    merchant_service: MerchantService = get_merchant_service_depends,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    order_id: str | None = Query(None),
+    status: str | None = Query(None),
+    merchant_id: str | None = Query(None),
+):
+    """
+    List payments with optional filtering.
+    - Buyers see only their own order payments.
+    - Merchants see payments for orders containing their items.
+    - Platform admins see all payments.
+    """
+    # Determine merchant_id based on user role for access control
+    resolved_merchant_id = merchant_id
+    user_role = current_user.role.value
+    if user_role == "merchant_owner" and not merchant_id:
+        merchant = await merchant_service.get_merchant_by_owner(str(current_user.id))
+        if merchant:
+            resolved_merchant_id = str(merchant.id)
+
+    return await service.list_payments(
+        skip=skip,
+        limit=limit,
+        order_id=order_id,
+        status=status,
+        merchant_id=resolved_merchant_id,
+    )
 
 
 @router.get("/{payment_id}", response_model=PaymentResponse)

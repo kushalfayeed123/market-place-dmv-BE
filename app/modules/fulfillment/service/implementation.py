@@ -142,6 +142,33 @@ class FulfillmentServiceImpl(FulfillmentService):
 
         return [self._to_response(fulfillment) for fulfillment in fulfillments]
 
+    async def list_fulfillments_by_merchant(
+        self,
+        merchant_id: str,
+        skip: int = 0,
+        limit: int = 100,
+        status: str | None = None,
+    ) -> list[FulfillmentResponse]:
+        """
+        List all fulfillments for a merchant from the database.
+
+        Args:
+            merchant_id: The merchant ID.
+            skip: Number of records to skip.
+            limit: Maximum number of records to return.
+            status: Optional status filter.
+
+        Returns:
+            List of fulfillment responses.
+        """
+        query = select(Fulfillment).where(Fulfillment.merchant_id == to_uuid(merchant_id))
+        if status:
+            query = query.where(Fulfillment.status == status)
+        query = query.offset(skip).limit(limit)
+        result = await self._db.execute(query)
+        fulfillments = result.scalars().all()
+        return [self._to_response(fulfillment) for fulfillment in fulfillments]
+
     async def update_shipment(
         self, shipment_data: ShipmentUpdate, fulfillment_id: str | None = None
     ) -> FulfillmentResponse:

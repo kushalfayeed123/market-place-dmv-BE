@@ -18,7 +18,7 @@ from app.schemas.fulfillment import (
     FulfillmentStatusUpdate,
     ShipmentUpdate,
 )
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 
 router = APIRouter()
@@ -27,6 +27,43 @@ router = APIRouter()
 get_current_active_user_depends = Depends(get_current_active_user)
 get_idempotency_depends = Depends(get_idempotency_dependency)
 get_fulfillment_service_depends = Depends(get_fulfillment_service)
+
+# --- list fulfillments (must come before /{fulfillment_id} route) ---
+
+
+@router.get("/", response_model=list[FulfillmentResponse])
+async def list_fulfillments(
+    request: Request,
+    current_user: dict = get_current_active_user_depends,
+    service: FulfillmentService = get_fulfillment_service_depends,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    merchant_id: str | None = Query(None),
+    status: str | None = Query(None),
+):
+    """List fulfillments for the current merchant (or by merchant_id for admins)."""
+    resolved_merchant_id = merchant_id
+    user_role = current_user.role.value
+
+    if user_role == "merchant_owner" and not merchant_id:
+        from app.modules.merchants.service.dependency import get_merchant_service
+        merchant_service = get_merchant_service()
+        merchant = await merchant_service.get_merchant(str(current_user.id))
+        if merchant:
+            resolved_merchant_id = str(merchant.id)
+
+    if resolved_merchant_id is None and user_role != "platform_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Merchant ID required for your role",
+        )
+
+    return await service.list_fulfillments_by_merchant(
+        merchant_id=resolved_merchant_id,
+        skip=skip,
+        limit=limit,
+        status=status,
+    )
 
 
 @router.post("/", response_model=FulfillmentResponse)

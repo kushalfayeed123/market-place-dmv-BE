@@ -137,25 +137,36 @@ class PaymentServiceImpl(PaymentService):
         limit: int = 100,
         order_id: str | None = None,
         status: str | None = None,
+        merchant_id: str | None = None,
     ) -> list[PaymentResponse]:
         """
         List payments with optional filtering from the database.
-        
+
         Args:
             skip: Number of records to skip.
             limit: Maximum number of records to return.
             order_id: Filter by order ID.
             status: Filter by payment status.
-            
+            merchant_id: Filter by merchant (joins through Order → OrderItem).
+
         Returns:
             List of payment responses.
         """
+        from app.models.order import Order
+        from app.models.order_item import OrderItem
+
         query = select(PaymentTransaction)
 
         if order_id:
             query = query.where(PaymentTransaction.order_id == order_id)
         if status:
             query = query.where(PaymentTransaction.status == status)
+        if merchant_id:
+            query = (
+                query.join(Order, PaymentTransaction.order_id == Order.id)
+                .join(OrderItem, OrderItem.order_id == Order.id)
+                .where(OrderItem.merchant_id == to_uuid(merchant_id))
+            )
 
         query = query.offset(skip).limit(limit)
         result = await self._db.execute(query)

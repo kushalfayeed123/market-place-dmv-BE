@@ -61,10 +61,32 @@ class FulfillmentService(ABC):
     ) -> list[FulfillmentResponse]:
         """
         List all fulfillments for an order.
-        
+
         Args:
             order_id: The order ID.
-            
+
+        Returns:
+            List of fulfillment responses.
+        """
+        ...
+
+    @abstractmethod
+    async def list_fulfillments_by_merchant(
+        self,
+        merchant_id: str,
+        skip: int = 0,
+        limit: int = 100,
+        status: str | None = None,
+    ) -> list[FulfillmentResponse]:
+        """
+        List all fulfillments for a merchant.
+
+        Args:
+            merchant_id: The merchant ID.
+            skip: Number of records to skip.
+            limit: Maximum number of records to return.
+            status: Optional status filter.
+
         Returns:
             List of fulfillment responses.
         """

@@ -141,7 +141,139 @@ class MerchantServiceImpl(MerchantService):
             city=merchant.city,
             state=merchant.state,
             postal_code=merchant.postal_code,
-            country=merchant.country,
+                        country=merchant.country,
             created_at=merchant.created_at,
             updated_at=merchant.updated_at,
         )
+
+    async def get_merchant_by_owner(self, user_id: str) -> MerchantResponse | None:
+        """Get a merchant by the owner's user ID."""
+        result = await self._db.execute(
+            select(Merchant).where(Merchant.owner_user_id == user_id)
+        )
+        merchant = result.scalar_one_or_none()
+        if merchant is None:
+            return None
+        return self._to_response(merchant)
+
+    async def update_merchant(
+        self, merchant_id: str, data: MerchantUpdate
+    ) -> MerchantResponse:
+        """Partially update a merchant."""
+        result = await self._db.execute(
+            select(Merchant).where(Merchant.id == merchant_id)
+        )
+        merchant = result.scalar_one_or_none()
+        if merchant is None:
+            raise ValueError("Merchant not found")
+        update_data = data.model_dump(exclude_unset=True)
+        for key, value in update_data.items():
+            setattr(merchant, key, value)
+        await self._db.commit()
+        await self._db.refresh(merchant)
+        return self._to_response(merchant)
+
+    async def create_payout_account(
+        self, merchant_id: str, data: MerchantPayoutAccountCreate
+    ) -> MerchantPayoutAccountResponse:
+        """Create a payout account for a merchant."""
+        account = MerchantPayoutAccount(
+            merchant_id=to_uuid(merchant_id),
+            provider=data.provider,
+            currency=data.currency,
+            external_ref=data.external_ref,
+            account_last4=data.account_last4,
+            bank_name=data.bank_name,
+            account_holder_name=data.account_holder_name,
+            bank_code=data.bank_code,
+            routing_number=data.routing_number,
+            account_type=data.account_type,
+            country=data.country,
+        )
+        self._db.add(account)
+        await self._db.commit()
+        await self._db.refresh(account)
+        return self._to_payout_response(account)
+
+    async def list_payout_accounts(
+        self, merchant_id: str, skip: int = 0, limit: int = 100
+    ) -> list[MerchantPayoutAccountResponse]:
+        """List payout accounts for a merchant."""
+        result = await self._db.execute(
+            select(MerchantPayoutAccount)
+            .where(MerchantPayoutAccount.merchant_id == to_uuid(merchant_id))
+            .offset(skip)
+            .limit(limit)
+        )
+        accounts = result.scalars().all()
+        return [self._to_payout_response(a) for a in accounts]
+
+    @staticmethod
+    def _to_payout_response(account: MerchantPayoutAccount) -> MerchantPayoutAccountResponse:
+        """Convert a MerchantPayoutAccount model to a response schema."""
+        return MerchantPayoutAccountResponse(
+            id=str(account.id),
+            merchant_id=str(account.merchant_id),
+            provider=account.provider,
+            currency=account.currency,
+            external_ref=account.external_ref,
+            account_last4=account.account_last4,
+            bank_name=account.bank_name,
+            account_holder_name=account.account_holder_name,
+            bank_code=account.bank_code,
+            routing_number=account.routing_number,
+            account_type=account.account_type,
+            country=account.country,
+            is_active=account.is_active,
+            created_at=account.created_at,
+            updated_at=account.updated_at,
+        )
+
+    async def get_payout_account(
+        self, merchant_id: str, payout_id: str
+    ) -> MerchantPayoutAccountResponse | None:
+        """Get a specific payout account."""
+        result = await self._db.execute(
+            select(MerchantPayoutAccount).where(
+                MerchantPayoutAccount.id == to_uuid(payout_id),
+                MerchantPayoutAccount.merchant_id == to_uuid(merchant_id),
+            )
+        )
+        account = result.scalar_one_or_none()
+        if account is None:
+            return None
+        return self._to_payout_response(account)
+
+    async def update_payout_account(
+        self, merchant_id: str, payout_id: str, data: MerchantPayoutAccountUpdate
+    ) -> MerchantPayoutAccountResponse:
+        """Update a payout account."""
+        account = await self.get_payout_account(merchant_id, payout_id)
+        if account is None:
+            raise ValueError("Payout account not found")
+        result = await self._db.execute(
+            select(MerchantPayoutAccount).where(
+                MerchantPayoutAccount.id == to_uuid(payout_id)
+            )
+        )
+        model = result.scalar_one_or_none()
+        update_data = data.model_dump(exclude_unset=True)
+        for key, value in update_data.items():
+            setattr(model, key, value)
+        await self._db.commit()
+        await self._db.refresh(model)
+        return self._to_payout_response(model)
+
+    async def delete_payout_account(self, merchant_id: str, payout_id: str) -> None:
+        """Delete (soft-delete) a payout account."""
+        result = await self._db.execute(
+            select(MerchantPayoutAccount).where(
+                MerchantPayoutAccount.id == to_uuid(payout_id),
+                MerchantPayoutAccount.merchant_id == to_uuid(merchant_id),
+            )
+        )
+        account = result.scalar_one_or_none()
+        if account is None:
+            raise ValueError("Payout account not found")
+        account.is_active = False
+        await self._db.commit()
