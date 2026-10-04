@@ -3,13 +3,21 @@
 Product model representing items sold in the marketplace.
 """
 
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Index, CheckConstraint, UniqueConstraint, text
-from app.db.types import UUID, BIGINT, CHAR
-from sqlalchemy.sql import func
 from enum import Enum as PyEnum
 
 from app.db.base import BaseModel
-from app.models.enums import InventoryPolicy
+from app.db.types import BIGINT, CHAR, UUID
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.sql import func
 
 
 class FulfillmentKind(PyEnum):
@@ -39,6 +47,10 @@ class Product(BaseModel):
     base_price_amount = Column(BIGINT, nullable=False)  # Minor units (kobo)
     base_price_currency = Column(CHAR(3), nullable=False, default="NGN")
     attributes = Column(Text, nullable=False, server_default=text("('{}')"))  # JSONB equivalent
+    # JSON-encoded array of product image URLs, e.g. '["https://cdn/x.jpg"]'.
+    # Stored as Text (the project's "JSONB-equivalent" convention, mirroring
+    # `attributes`); list encode/decode is handled in the service layer.
+    urls = Column(Text, nullable=False, server_default=text("('[]')"))  # product image URLs
 
     # Indexes and constraints
     __table_args__ = (

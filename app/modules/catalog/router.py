@@ -5,6 +5,10 @@ Communicates with the service layer via the CatalogService abstraction.
 """
 
 
+import mimetypes
+import uuid
+from pathlib import Path
+
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
 from app.core.security import get_current_active_user
 from app.modules.catalog.service.base import CatalogService
@@ -18,9 +22,13 @@ from app.schemas.catalog import (
     ProductVariantCreate,
     ProductVariantResponse,
 )
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 
 router = APIRouter()
+
+# Local filesystem backing for product image uploads. Served via StaticFiles mounted
+# at /uploads in app/main.py. Production should swap this for Cloudflare R2.
+UPLOAD_DIR = Path(__file__).resolve().parents[3] / "static" / "uploads" / "products"
 
 # Module-level dependency singletons (avoids B008 function calls in argument defaults)
 get_current_active_user_depends = Depends(get_current_active_user)
@@ -191,6 +199,71 @@ async def create_product_variant(
         request, None, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
     )
     return response_data
+
+
+# Product image upload — part of the product creation flow.
+@router.post(
+    "/products/{product_id}/images",
+    response_model=ProductResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def upload_product_image(
+    request: Request,
+    product_id: str,
+    image: UploadFile = File(..., description="Product image (PNG/JPG/WebP/GIF, max 5MB)"),
+    current_user: dict = get_current_active_user_depends,
+    service: CatalogService = get_catalog_service_depends,
+):
+    """Upload a product image and append its URL to the product's `urls`.
+
+    Workflow: create the product first (`POST /products`), then call this endpoint one
+    or more times to add images. Each uploaded image is stored under
+    `/uploads/products/` and its URL is appended to `Product.urls`.
+    """
+    if current_user.role.value not in ["merchant_owner", "merchant_staff", "platform_admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions",
+        )
+
+    content_type = image.content_type or ""
+    allowed = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    ext = allowed.get(content_type)
+    if ext is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image (PNG/JPG/WebP/GIF)",
+        )
+
+    contents = await image.read()
+    max_bytes = 5 * 1024 * 1024
+    if len(contents) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Image too large (max {max_bytes // (1024 * 1024)}MB)",
+        )
+    if not contents:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
+
+    filename = f"{uuid.uuid4().hex}{ext}"
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    (UPLOAD_DIR / filename).write_bytes(contents)
+    image_url = f"/uploads/products/{filename}"
+
+    try:
+        product = await service.add_product_image(product_id, image_url)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    return product
 
 
 # Inventory endpoints

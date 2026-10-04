@@ -34,6 +34,7 @@ class ProductCreate(BaseModel):
     base_price_amount: int = Field(..., ge=0)  # Minor units
     base_price_currency: str = Field(default="NGN", min_length=3, max_length=3)
     attributes: dict[str, Any] | None = {}
+    urls: list[str] | None = None
 
 
 class ProductResponse(BaseModel):
@@ -50,6 +51,7 @@ class ProductResponse(BaseModel):
     base_price_amount: int
     base_price_currency: str
     attributes: dict[str, Any]
+    urls: list[str] = []  # product image URLs
     created_at: datetime
     updated_at: datetime
     variants: list["ProductVariantResponse"] = []

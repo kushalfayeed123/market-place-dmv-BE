@@ -185,7 +185,8 @@ class CatalogServiceImpl(CatalogService):
             status=product_data.status or ProductStatus.DRAFT,
             base_price_amount=product_data.base_price_amount,
             base_price_currency=product_data.base_price_currency,
-            attributes=json.dumps(product_data.attributes or {}),
+                        attributes=json.dumps(product_data.attributes or {}),
+            urls=json.dumps(product_data.urls or []),
         )
 
         self._db.add(new_product)
@@ -193,6 +194,33 @@ class CatalogServiceImpl(CatalogService):
         await self._db.refresh(new_product)
 
         return self._product_to_response(new_product)
+
+    async def add_product_image(self, product_id: str, image_url: str) -> ProductResponse:
+        """Append an image URL to a product's ``urls`` JSON list (stored on a Text column)."""
+        try:
+            product_uuid = to_uuid(product_id)
+        except ValueError:
+            raise ValueError(f"Invalid product_id format: '{product_id}'")
+
+        product = await self._db.get(Product, product_uuid)
+        if product is None:
+            raise ValueError(f"Product with id '{product_id}' does not exist")
+
+        urls = product.urls
+        if isinstance(urls, str):
+            try:
+                urls = json.loads(urls)
+            except (json.JSONDecodeError, TypeError):
+                urls = []
+        if not isinstance(urls, list):
+            urls = []
+        if image_url not in urls:
+            urls.append(image_url)
+        product.urls = json.dumps(urls)
+
+        await self._db.commit()
+        await self._db.refresh(product)
+        return self._product_to_response(product)
 
     @staticmethod
     def _validate_attributes(attributes: dict, schema: dict) -> None:
@@ -593,13 +621,27 @@ class CatalogServiceImpl(CatalogService):
         """
         import json
 
-        # Parse attributes from JSON string to dict if needed
+                # Parse attributes from JSON string to dict if needed
         attributes = product.attributes
         if isinstance(attributes, str):
             try:
                 attributes = json.loads(attributes)
             except (json.JSONDecodeError, TypeError):
                 attributes = {}
+
+        # Parse product image URLs from JSON string (Text "JSONB-equivalent" column)
+        urls_list: list = []
+        if product.urls:
+            try:
+                urls_list = (
+                    json.loads(product.urls)
+                    if isinstance(product.urls, str)
+                    else (product.urls or [])
+                )
+            except (json.JSONDecodeError, TypeError):
+                urls_list = []
+        if not isinstance(urls_list, list):
+            urls_list = []
 
         # Parse variant attributes and convert
         variant_responses = []
@@ -626,7 +668,8 @@ class CatalogServiceImpl(CatalogService):
             status=product.status,
             base_price_amount=product.base_price_amount,
             base_price_currency=product.base_price_currency,
-            attributes=attributes or {},
+                        attributes=attributes or {},
+            urls=urls_list,
             created_at=product.created_at,
             updated_at=product.updated_at,
             variants=variant_responses,

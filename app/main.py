@@ -4,6 +4,12 @@ Main FastAPI application entry point.
 Initializes the app, registers middleware, and includes routers.
 """
 
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.rate_limit import setup_rate_limiting
@@ -12,16 +18,14 @@ from app.modules.auth.router import router as auth_router
 from app.modules.catalog.router import router as catalog_router
 from app.modules.commissions.router import router as commissions_router
 from app.modules.fulfillment.router import router as fulfillment_router
-from app.modules.ledger.router import router as ledger_router
 from app.modules.knowledge.router import router as knowledge_router
-from app.modules.support.router import router as support_router
+from app.modules.ledger.router import router as ledger_router
 from app.modules.merchants.router import router as merchants_router
 from app.modules.orders.router import router as orders_router
 from app.modules.payments.router import router as payments_router
 from app.modules.product_attributes.router import router as product_attributes_router
 from app.modules.stores.router import router as stores_router
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from app.modules.support.router import router as support_router
 
 # Setup logging
 setup_logging()
@@ -68,6 +72,11 @@ app.include_router(ledger_router, prefix=f"{settings.API_V1_STR}/ledger", tags=[
 app.include_router(fulfillment_router, prefix=f"{settings.API_V1_STR}/fulfillment", tags=["fulfillment"])
 app.include_router(knowledge_router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["knowledge"])
 app.include_router(support_router, prefix=f"{settings.API_V1_STR}/support", tags=["support"])
+
+# Serve product image uploads at /uploads/* (written by the catalog image-upload route)
+_uploads_root = Path(__file__).resolve().parents[1] / "static" / "uploads"
+_uploads_root.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(_uploads_root)), name="uploads")
 
 # Setup security after routers are included (configures OAuth2 bearer token for Swagger UI)
 setup_security(app)

@@ -73,8 +73,25 @@ class CatalogService(ABC):
         Args:
             product_data: The product data to create.
             
-        Returns:
+                Returns:
             The created product response.
+        """
+        ...
+
+    @abstractmethod
+    async def add_product_image(self, product_id: str, image_url: str) -> ProductResponse:
+        """
+        Append an image URL to a product's `urls`.
+
+        Args:
+            product_id: The product ID.
+            image_url: The image URL to associate with the product.
+
+        Returns:
+            The updated product response.
+
+        Raises:
+            ValueError: If the product does not exist.
         """
         ...
 
