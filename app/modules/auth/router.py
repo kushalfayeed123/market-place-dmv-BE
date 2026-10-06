@@ -33,7 +33,7 @@ get_auth_service_depends = Depends(get_auth_service)
 oauth2_form_depends = Depends(OAuth2PasswordRequestForm)
 
 
-@router.post("/register", response_model=TokenResponse)
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def register(
     request: Request,
     user_data: UserRegister,

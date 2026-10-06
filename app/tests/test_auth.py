@@ -17,7 +17,9 @@ async def test_register_user(client: AsyncClient):
         json={
             "email": "test@example.com",
             "password": "securepassword123",
-            "role": "buyer"
+            "role": "buyer",
+            "first_name": "Test",
+            "last_name": "User",
         }
     )
     assert response.status_code == 201
@@ -37,15 +39,17 @@ async def test_login_user(client: AsyncClient):
         json={
             "email": "test2@example.com",
             "password": "securepassword123",
-            "role": "buyer"
+            "role": "buyer",
+            "first_name": "Test",
+            "last_name": "Two",
         }
     )
-    
-    # Then login
+
+    # Then login using form data (OAuth2PasswordRequestForm)
     response = await client.post(
         "/api/v1/auth/login",
-        json={
-            "email": "test2@example.com",
+        data={
+            "username": "test2@example.com",
             "password": "securepassword123"
         }
     )
@@ -64,17 +68,21 @@ async def test_register_duplicate_email(client: AsyncClient):
         json={
             "email": "test3@example.com",
             "password": "securepassword123",
-            "role": "buyer"
+            "role": "buyer",
+            "first_name": "Test",
+            "last_name": "Three",
         }
     )
-    
+
     # Try to register again with same email
     response = await client.post(
         "/api/v1/auth/register",
         json={
             "email": "test3@example.com",
             "password": "differentpassword456",
-            "role": "buyer"
+            "role": "buyer",
+            "first_name": "Test",
+            "last_name": "Three",
         }
     )
     assert response.status_code == 400
@@ -86,8 +94,8 @@ async def test_login_invalid_credentials(client: AsyncClient):
     """Test login with invalid credentials."""
     response = await client.post(
         "/api/v1/auth/login",
-        json={
-            "email": "nonexistent@example.com",
+        data={
+            "username": "nonexistent@example.com",
             "password": "wrongpassword"
         }
     )
