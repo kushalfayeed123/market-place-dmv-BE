@@ -4,25 +4,29 @@ Merchants router handling merchant-related operations.
 Communicates with the service layer via the MerchantService abstraction.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
-
 from app.core.security import get_current_active_user
 from app.modules.merchants.service.base import MerchantService
 from app.modules.merchants.service.dependency import get_merchant_service
+from app.modules.stores.service.base import StoreService
+from app.modules.stores.service.dependency import get_store_service
 from app.schemas.merchants import (
     MerchantCreate,
-    MerchantResponse,
-    MerchantUpdate,
+    MerchantOnboard,
     MerchantPayoutAccountCreate,
     MerchantPayoutAccountResponse,
     MerchantPayoutAccountUpdate,
+    MerchantResponse,
+    MerchantUpdate,
 )
+from app.schemas.store import StoreCreate
+from fastapi import APIRouter, Depends, HTTPException, status
 
 router = APIRouter()
 
 # Module-level dependency singletons (avoids B008 function calls in argument defaults)
 get_current_active_user_depends = Depends(get_current_active_user)
 get_merchant_service_depends = Depends(get_merchant_service)
+get_store_service_depends = Depends(get_store_service)
 
 
 @router.post("/", response_model=MerchantResponse)
@@ -36,13 +40,59 @@ async def create_merchant(
     if (
         current_user.role.value != "platform_admin"
         and current_user.role.value != "merchant_owner"
-    ):
+        ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only platform admins can create merchants",
         )
 
     return await service.create_merchant(merchant_data)
+
+
+@router.post("/onboard", response_model=MerchantResponse)
+async def onboard_merchant(
+    merchant_data: MerchantOnboard,
+    current_user: dict = get_current_active_user_depends,
+    service: MerchantService = get_merchant_service_depends,
+    store_service: StoreService = get_store_service_depends,
+):
+    """
+    Self-service onboarding for the authenticated ``merchant_owner``.
+
+    Creates a merchant (and primary store) record for the current user.
+    The ``owner_user_id`` and ``commission_plan_id`` are derived
+    server-side so the client never supplies them.
+    """
+    if current_user.role.value != "merchant_owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only merchant owners can onboard a merchant",
+        )
+
+    try:
+        merchant = await service.create_merchant_for_user(
+            str(current_user.id), merchant_data
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    # Create a primary store for the new merchant
+    try:
+        await store_service.create_store(
+            StoreCreate(
+                merchant_id=merchant.id,
+                name=merchant.business_name,
+                slug=merchant.slug,
+            )
+        )
+    except ValueError:
+        # Store creation failure is non-fatal for onboarding
+        pass
+
+    return merchant
 
 
 @router.get("/", response_model=list[MerchantResponse])

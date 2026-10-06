@@ -33,6 +33,29 @@ class MerchantCreate(BaseModel):
     country: Optional[str] = None  # ISO 3166-1 alpha-2
 
 
+class MerchantOnboard(BaseModel):
+    """
+    Schema for the self-service onboarding flow.
+
+    Used by the currently authenticated ``merchant_owner`` to create their
+    own merchant (and primary store) record.  Unlike :class:`MerchantCreate`
+    the endpoint derives ``owner_user_id`` from the JWT and
+    ``commission_plan_id`` from the default commission plan, so the caller
+    never has to supply those values.
+    """
+
+    business_name: str = Field(..., min_length=1, max_length=255)
+    slug: str = Field(..., min_length=1, max_length=255)
+
+    # Merchant address fields
+    address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    postal_code: Optional[str] = None
+    country: Optional[str] = None  # ISO 3166-1 alpha-2
+
+
 class MerchantUpdate(BaseModel):
     """Partial-update schema for PUT /{merchant_id}."""
 

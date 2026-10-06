@@ -5,6 +5,13 @@ Handles database operations for ledger using SQLAlchemy.
 """
 
 
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.functions import func
+
+from app.core.security import (
+    to_uuid,
+)
 from app.models.ledger_entry import LedgerEntry
 from app.models.merchant import Merchant
 from app.models.order import Order
@@ -13,9 +20,6 @@ from app.schemas.ledger import (
     LedgerBalanceResponse,
     LedgerEntryResponse,
 )
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.functions import func
 
 
 class LedgerServiceImpl(LedgerService):
@@ -158,7 +162,7 @@ class LedgerServiceImpl(LedgerService):
         """
         # Verify merchant exists
         result = await self._db.execute(
-            select(Merchant).where(Merchant.id == merchant_id)
+            select(Merchant).where(Merchant.id == to_uuid(merchant_id))
         )
         merchant = result.scalar_one_or_none()
 

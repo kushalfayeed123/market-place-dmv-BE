@@ -8,17 +8,19 @@ from enum import Enum as PyEnum
 from sqlalchemy import (
     CHAR,
     Column,
-    String,
-    Text,
     DateTime,
     ForeignKey,
     Index,
+    String,
+    Text,
     UniqueConstraint,
 )
-from app.db.types import UUID, ENUM as PgEnum
 from sqlalchemy.sql import func
 
 from app.db.base import BaseModel
+from app.db.types import ENUM as PgEnum
+from app.db.types import UUID
+
 
 class KycStatus(PyEnum):
     PENDING = "pending"

@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 
 from app.schemas.merchants import (
     MerchantCreate,
+    MerchantOnboard,
     MerchantPayoutAccountCreate,
     MerchantPayoutAccountResponse,
     MerchantPayoutAccountUpdate,
@@ -37,6 +38,32 @@ class MerchantService(ABC):
             
         Raises:
             ValueError: If merchant data is invalid.
+            RuntimeError: If creation fails.
+        """
+        ...
+
+    @abstractmethod
+    async def create_merchant_for_user(
+        self, user_id: str, data: MerchantOnboard
+    ) -> MerchantResponse:
+        """
+        Create a merchant (and primary store) for a specific user
+        during the self-service onboarding flow.
+
+        Unlike :meth:`create_merchant`, the ``owner_user_id`` is derived
+        from *user_id* and the ``commission_plan_id`` is resolved from
+        the default commission plan, so the caller never supplies them.
+
+        Args:
+            user_id: The UUID of the user owning the merchant.
+            data: The onboarding payload (business name, slug, …).
+
+        Returns:
+            The created merchant response.
+
+        Raises:
+            ValueError: If a merchant already exists for the user,
+                        or if no default commission plan is configured.
             RuntimeError: If creation fails.
         """
         ...

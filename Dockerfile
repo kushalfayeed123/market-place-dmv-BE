@@ -1,30 +1,16 @@
-# Dockerfile
 FROM python:3.12-slim
 
-# Set working directory
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PATH="/app/.venv/bin:$PATH"
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+# Install dependencies first so this layer is cached
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-# Copy requirements and install Python dependencies
-COPY pyproject.toml .
-COPY .env.example .
-
-# Install dependencies
-RUN pip install --no-cache-dir -e .
-
-# Copy application code
 COPY . .
+RUN uv sync --frozen --no-dev
 
-# Create non-root user
-RUN adduser --disabled-password --gecos '' appuser
-USER appuser
-
-# Expose port
-EXPOSE 8000
-
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Adjust "app.main:app" to your module path
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

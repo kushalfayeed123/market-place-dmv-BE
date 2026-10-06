@@ -1,4 +1,4 @@
-# app/modules/merchants/service/implementation.py
+﻿# app/modules/merchants/service/implementation.py
 """
 Concrete implementation of the merchant service.
 Handles database operations for merchants using SQLAlchemy.
@@ -11,11 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import (
     to_uuid,
 )
+from app.models.commission_plan import CommissionPlan
 from app.models.merchant import KycStatus, Merchant
 from app.models.merchant_payout_account import MerchantPayoutAccount
+from app.models.store import Store
 from app.modules.merchants.service.base import MerchantService
 from app.schemas.merchants import (
     MerchantCreate,
+    MerchantOnboard,
     MerchantPayoutAccountCreate,
     MerchantPayoutAccountResponse,
     MerchantPayoutAccountUpdate,
@@ -79,6 +82,71 @@ class MerchantServiceImpl(MerchantService):
 
         return self._to_response(new_merchant)
 
+    async def create_merchant_for_user(
+        self, user_id: str, data: MerchantOnboard
+    ) -> MerchantResponse:
+        """
+        Create a merchant (and a primary store) for a specific user
+        during the self-service onboarding flow.
+
+        Args:
+            user_id: The UUID of the owning user.
+            data: The onboarding payload (business name, slug, …).
+
+        Returns:
+            The created merchant response.
+
+        Raises:
+            ValueError: If a merchant already exists for the user,
+                        or if no default commission plan is configured.
+        """
+        owner_uuid = to_uuid(user_id)
+
+        # Idempotency: refuse to create a second merchant for the same owner
+        existing = await self._db.execute(
+            select(Merchant).where(Merchant.owner_user_id == owner_uuid)
+        )
+        if existing.scalar_one_or_none() is not None:
+            raise ValueError("A merchant already exists for this user")
+
+        # Resolve the default commission plan
+        plan_result = await self._db.execute(
+            select(CommissionPlan).where(CommissionPlan.is_default == True)
+        )
+        default_plan = plan_result.scalar_one_or_none()
+        if default_plan is None:
+            raise ValueError("No default commission plan is configured")
+
+        # Create the merchant entity
+        new_merchant = Merchant(
+            owner_user_id=owner_uuid,
+            business_name=data.business_name,
+            slug=data.slug,
+            kyc_status=KycStatus.PENDING,
+            commission_plan_id=default_plan.id,
+            address_line1=data.address_line1,
+            address_line2=data.address_line2,
+            city=data.city,
+            state=data.state,
+            postal_code=data.postal_code,
+            country=data.country,
+        )
+        self._db.add(new_merchant)
+        await self._db.commit()
+        await self._db.refresh(new_merchant)
+
+        # Create a primary store so the merchant can immediately
+        # accept product listings and orders.
+        new_store = Store(
+            merchant_id=new_merchant.id,
+            name=data.business_name,
+            slug=data.slug,
+        )
+        self._db.add(new_store)
+        await self._db.commit()
+
+        return self._to_response(new_merchant)
+
     async def list_merchants(self, skip: int = 0, limit: int = 100) -> list[MerchantResponse]:
         """
         List merchants with pagination from the database.
@@ -108,7 +176,7 @@ class MerchantServiceImpl(MerchantService):
             The merchant response if found, None otherwise.
         """
         result = await self._db.execute(
-            select(Merchant).where(Merchant.id == merchant_id)
+            select(Merchant).where(Merchant.id == to_uuid(merchant_id))
         )
         merchant = result.scalar_one_or_none()
 
@@ -141,7 +209,7 @@ class MerchantServiceImpl(MerchantService):
             city=merchant.city,
             state=merchant.state,
             postal_code=merchant.postal_code,
-                        country=merchant.country,
+            country=merchant.country,
             created_at=merchant.created_at,
             updated_at=merchant.updated_at,
         )
@@ -149,7 +217,7 @@ class MerchantServiceImpl(MerchantService):
     async def get_merchant_by_owner(self, user_id: str) -> MerchantResponse | None:
         """Get a merchant by the owner's user ID."""
         result = await self._db.execute(
-            select(Merchant).where(Merchant.owner_user_id == user_id)
+            select(Merchant).where(Merchant.owner_user_id == to_uuid(user_id))
         )
         merchant = result.scalar_one_or_none()
         if merchant is None:
