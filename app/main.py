@@ -21,6 +21,8 @@ from app.modules.fulfillment.router import router as fulfillment_router
 from app.modules.knowledge.router import router as knowledge_router
 from app.modules.ledger.router import router as ledger_router
 from app.modules.merchants.router import router as merchants_router
+from app.modules.merchant_console.router import router as merchant_console_router
+from app.modules.merchant_console.agent_router import router as agent_router
 from app.modules.notifications.router import router as notifications_router
 from app.modules.orders.router import router as orders_router
 from app.modules.payments.router import router as payments_router
@@ -74,6 +76,11 @@ app.include_router(fulfillment_router, prefix=f"{settings.API_V1_STR}/fulfillmen
 app.include_router(knowledge_router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["knowledge"])
 app.include_router(notifications_router, prefix=f"{settings.API_V1_STR}/notifications", tags=["notifications"])
 app.include_router(support_router, prefix=f"{settings.API_V1_STR}/support", tags=["support"])
+# Merchant console: dashboard list endpoints, resource actions, and agent.
+# Registered last so the module-prefixed routers above take priority on
+# overlapping path segments (e.g. /orders/{id} vs /orders/{id}/accept).
+app.include_router(merchant_console_router, prefix=settings.API_V1_STR, tags=["merchant-console"])
+app.include_router(agent_router, prefix=settings.API_V1_STR, tags=["agent"])
 
 # Serve product image uploads at /uploads/* (written by the catalog image-upload route)
 _uploads_root = Path(__file__).resolve().parents[1] / "static" / "uploads"

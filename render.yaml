@@ -1,0 +1,29 @@
+# render.yaml for the BACKEND repo. Place at the root of this repo,
+# next to Dockerfile, pyproject.toml and uv.lock.
+# Deploy via Render Dashboard -> New -> Blueprint -> select this repo.
+
+services:
+  - type: web
+    name: markto-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: frankfurt            # closest Render region to your Aiven DB (DigitalOcean Amsterdam)
+    plan: starter                # free instances spin down when idle
+    healthCheckPath: /health
+    autoDeployTrigger: commit    # redeploy on every push to the linked branch
+    # Uncomment if you use Alembic (pre-deploy commands need a paid instance):
+    # preDeployCommand: alembic upgrade head
+    envVars:
+      - key: DATABASE_URL        # mysql+pymysql://avnadmin:<password>@<host>:<port>/marketplace_dev
+        sync: false              # entered in the dashboard, never stored in Git
+      - key: JWT_SECRET
+        generateValue: true      # Render generates a random secret
+      - key: AGENT_URL           # e.g. https://marketplace-agent.onrender.com
+        sync: false
+      - key: ALLOWED_ORIGINS     # your frontend's production domain(s), for CORS
+        sync: false
+      - key: OPENAI_API_KEY      # rename/replace with whichever LLM keys you use
+        sync: false
+      # Add any payment/escrow or other keys the same way:
+      # - key: PAYMENT_SECRET_KEY
+      #   sync: false
