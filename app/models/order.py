@@ -25,6 +25,9 @@ class Order(BaseModel):
     __tablename__ = "orders"
 
     buyer_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # Human-readable order number, e.g. "ORD-20261005-8a3f". Unique and
+    # customer-facing (used in confirmation emails + UI).
+    order_number = Column(String(50), nullable=False, unique=True, index=True)
     status = Column(String(50), nullable=False, default=OrderStatus.PENDING.value)
     currency = Column(CHAR(3), nullable=False)
     total_amount = Column(BIGINT, nullable=False)  # Minor units
@@ -41,4 +44,4 @@ class Order(BaseModel):
     )
 
     def __repr__(self):
-        return f"<Order(id={self.id}, buyer_id={self.buyer_id}, status={self.status}, total={self.total_amount})>"
+        return f"<Order(id={self.id}, order_number={self.order_number}, buyer_id={self.buyer_id}, status={self.status}, total={self.total_amount})>"

@@ -24,6 +24,7 @@ class CheckoutRequest(BaseModel):
 
 class CheckoutResponse(BaseModel):
     id: str
+    order_number: str
     status: str
     currency: str
     total_amount: int  # Minor units
@@ -34,6 +35,7 @@ class CheckoutResponse(BaseModel):
 
 class OrderResponse(BaseModel):
     id: str
+    order_number: str
     buyer_id: str
     status: str
     currency: str

@@ -5,6 +5,9 @@ Handles database operations for orders using SQLAlchemy.
 """
 
 
+import uuid
+from datetime import datetime, timezone
+
 from app.core.security import to_uuid
 from app.models.inventory import Inventory
 from app.models.order import Order, OrderStatus
@@ -19,6 +22,16 @@ from app.schemas.orders import (
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+def _generate_order_number() -> str:
+    """Generate a human-readable, unique order number.
+
+    Format: ORD-YYYYMMDD-HHMMSS-XXXX where XXXX is 4 hex chars from a UUID.
+    Example: ORD-20261005-143022-8a3f
+    """
+    now = datetime.now(timezone.utc)
+    return f"ORD-{now.strftime('%Y%m%d')}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:4]}"
 
 
 class OrderServiceImpl(OrderService):
@@ -115,6 +128,7 @@ class OrderServiceImpl(OrderService):
         # Create order
         new_order = Order(
             buyer_id=to_uuid(buyer_id),
+            order_number=_generate_order_number(),
             status=OrderStatus.PENDING.value,
             currency=currency,
             total_amount=order_total,
@@ -137,6 +151,7 @@ class OrderServiceImpl(OrderService):
 
         return CheckoutResponse(
             id=str(new_order.id),
+            order_number=new_order.order_number,
             status=new_order.status,
             currency=new_order.currency,
             total_amount=new_order.total_amount,
@@ -190,6 +205,7 @@ class OrderServiceImpl(OrderService):
 
         return OrderResponse(
             id=str(order.id),
+            order_number=order.order_number,
             buyer_id=str(order.buyer_id),
             status=order.status,
             currency=order.currency,
@@ -266,6 +282,7 @@ class OrderServiceImpl(OrderService):
             responses.append(
                 OrderResponse(
                     id=str(order.id),
+                    order_number=order.order_number,
                     buyer_id=str(order.buyer_id),
                     status=order.status,
                     currency=order.currency,

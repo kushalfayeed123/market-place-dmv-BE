@@ -21,6 +21,7 @@ from app.modules.fulfillment.router import router as fulfillment_router
 from app.modules.knowledge.router import router as knowledge_router
 from app.modules.ledger.router import router as ledger_router
 from app.modules.merchants.router import router as merchants_router
+from app.modules.notifications.router import router as notifications_router
 from app.modules.orders.router import router as orders_router
 from app.modules.payments.router import router as payments_router
 from app.modules.product_attributes.router import router as product_attributes_router
@@ -71,6 +72,7 @@ app.include_router(product_attributes_router, prefix=f"{settings.API_V1_STR}/pro
 app.include_router(ledger_router, prefix=f"{settings.API_V1_STR}/ledger", tags=["ledger"])
 app.include_router(fulfillment_router, prefix=f"{settings.API_V1_STR}/fulfillment", tags=["fulfillment"])
 app.include_router(knowledge_router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["knowledge"])
+app.include_router(notifications_router, prefix=f"{settings.API_V1_STR}/notifications", tags=["notifications"])
 app.include_router(support_router, prefix=f"{settings.API_V1_STR}/support", tags=["support"])
 
 # Serve product image uploads at /uploads/* (written by the catalog image-upload route)

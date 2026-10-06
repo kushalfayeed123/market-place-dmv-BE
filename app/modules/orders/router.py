@@ -10,8 +10,11 @@ from app.core.rate_limit import sliding_window_allow
 from app.core.security import get_current_active_user
 from app.modules.merchants.service.base import MerchantService
 from app.modules.merchants.service.dependency import get_merchant_service
+from app.modules.notifications.service.base import NotificationService
+from app.modules.notifications.service.dependency import get_notification_service
 from app.modules.orders.service.base import OrderService
 from app.modules.orders.service.dependency import get_order_service
+from app.schemas.notification import NotificationCreate
 from app.schemas.orders import (
     CheckoutRequest,
     CheckoutResponse,
@@ -26,6 +29,7 @@ get_current_active_user_depends = Depends(get_current_active_user)
 get_idempotency_depends = Depends(get_idempotency_dependency)
 get_order_service_depends = Depends(get_order_service)
 get_merchant_service_depends = Depends(get_merchant_service)
+get_notification_service_depends = Depends(get_notification_service)
 
 
 @router.post("/checkout", response_model=CheckoutResponse)
@@ -34,6 +38,7 @@ async def checkout(
     checkout_data: CheckoutRequest,
     current_user: dict = get_current_active_user_depends,
     service: OrderService = get_order_service_depends,
+    notification_service: NotificationService = get_notification_service_depends,
     idempotency: dict = get_idempotency_depends,
 ):
     """
@@ -77,6 +82,32 @@ async def checkout(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
         )
+
+    # Create notifications: order confirmation for the buyer and a
+    # new-order notice for each merchant whose products are on the order.
+    await notification_service.create_notification(
+        NotificationCreate(
+            user_id=str(current_user.id),
+            type="order_confirmation",
+            subject=f"Order {response_data.order_number} confirmed",
+            body=f"Your order {response_data.order_number} has been placed successfully.",
+            related_order_id=response_data.id,
+        )
+    )
+    seen_merchants: set[str] = set()
+    for item in response_data.items:
+        merchant_id = item.get("merchant_id")
+        if merchant_id and merchant_id not in seen_merchants:
+            seen_merchants.add(merchant_id)
+            await notification_service.create_notification(
+                NotificationCreate(
+                    merchant_id=merchant_id,
+                    type="merchant_new_order",
+                    subject=f"New order {response_data.order_number} received",
+                    body=f"You received a new order {response_data.order_number}.",
+                    related_order_id=response_data.id,
+                )
+            )
 
     await finalize_idempotency(
         request, None, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
