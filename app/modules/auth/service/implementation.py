@@ -194,8 +194,8 @@ class AuthServiceImpl(AuthService):
         if not stored_token:
             raise ValueError("Invalid refresh token")
 
-        # Check if token is expired
-        if stored_token.expires_at < datetime.now(timezone.utc):
+        # Check if token is expired (MySQL DATETIME is timezone-naive, so compare with naive UTC)
+        if stored_token.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
             raise ValueError("Refresh token expired")
 
         # Get the user

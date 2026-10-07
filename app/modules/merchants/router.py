@@ -4,6 +4,8 @@ Merchants router handling merchant-related operations.
 Communicates with the service layer via the MerchantService abstraction.
 """
 
+from fastapi import APIRouter, Depends, HTTPException, status
+
 from app.core.security import get_current_active_user
 from app.modules.merchants.service.base import MerchantService
 from app.modules.merchants.service.dependency import get_merchant_service
@@ -19,7 +21,6 @@ from app.schemas.merchants import (
     MerchantUpdate,
 )
 from app.schemas.store import StoreCreate
-from fastapi import APIRouter, Depends, HTTPException, status
 
 router = APIRouter()
 
@@ -40,7 +41,7 @@ async def create_merchant(
     if (
         current_user.role.value != "platform_admin"
         and current_user.role.value != "merchant_owner"
-        ):
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only platform admins can create merchants",
@@ -78,19 +79,6 @@ async def onboard_merchant(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-
-    # Create a primary store for the new merchant
-    try:
-        await store_service.create_store(
-            StoreCreate(
-                merchant_id=merchant.id,
-                name=merchant.business_name,
-                slug=merchant.slug,
-            )
-        )
-    except ValueError:
-        # Store creation failure is non-fatal for onboarding
-        pass
 
     return merchant
 
@@ -155,6 +143,29 @@ async def get_merchant_by_owner(
     return merchant
 
 
+@router.get("/{merchant_id}", response_model=MerchantResponse)
+async def get_merchant(
+    merchant_id: str,
+    current_user: dict = get_current_active_user_depends,
+    service: MerchantService = get_merchant_service_depends,
+):
+    """Get a merchant by ID."""
+    merchant = await service.get_merchant(merchant_id)
+    if not merchant:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(
+        current_user.id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this merchant",
+        )
+    return merchant
+
+
 @router.put("/{merchant_id}", response_model=MerchantResponse)
 async def update_merchant(
     merchant_id: str,
@@ -168,7 +179,9 @@ async def update_merchant(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Merchant not found"
         )
-    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(current_user.id):
+    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(
+        current_user.id
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to update this merchant",
@@ -179,7 +192,9 @@ async def update_merchant(
 # --- Payout account endpoints ---
 
 
-@router.post("/{merchant_id}/payout-accounts", response_model=MerchantPayoutAccountResponse)
+@router.post(
+    "/{merchant_id}/payout-accounts", response_model=MerchantPayoutAccountResponse
+)
 async def create_payout_account(
     merchant_id: str,
     data: MerchantPayoutAccountCreate,
@@ -190,12 +205,16 @@ async def create_payout_account(
     merchant = await service.get_merchant(merchant_id)
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant not found")
-    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(current_user.id):
+    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(
+        current_user.id
+    ):
         raise HTTPException(status_code=403, detail="Not authorized")
     return await service.create_payout_account(merchant_id, data)
 
 
-@router.get("/{merchant_id}/payout-accounts", response_model=list[MerchantPayoutAccountResponse])
+@router.get(
+    "/{merchant_id}/payout-accounts", response_model=list[MerchantPayoutAccountResponse]
+)
 async def list_payout_accounts(
     merchant_id: str,
     current_user: dict = get_current_active_user_depends,
@@ -207,12 +226,17 @@ async def list_payout_accounts(
     merchant = await service.get_merchant(merchant_id)
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant not found")
-    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(current_user.id):
+    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(
+        current_user.id
+    ):
         raise HTTPException(status_code=403, detail="Not authorized")
     return await service.list_payout_accounts(merchant_id, skip=skip, limit=limit)
 
 
-@router.get("/{merchant_id}/payout-accounts/{payout_id}", response_model=MerchantPayoutAccountResponse)
+@router.get(
+    "/{merchant_id}/payout-accounts/{payout_id}",
+    response_model=MerchantPayoutAccountResponse,
+)
 async def get_payout_account(
     merchant_id: str,
     payout_id: str,
@@ -224,6 +248,55 @@ async def get_payout_account(
     if not account:
         raise HTTPException(status_code=404, detail="Payout account not found")
     return account
+
+
+@router.put(
+    "/{merchant_id}/payout-accounts/{payout_id}",
+    response_model=MerchantPayoutAccountResponse,
+)
+async def update_payout_account(
+    merchant_id: str,
+    payout_id: str,
+    data: MerchantPayoutAccountUpdate,
+    current_user: dict = get_current_active_user_depends,
+    service: MerchantService = get_merchant_service_depends,
+):
+    """Update a payout account for a merchant."""
+    merchant = await service.get_merchant(merchant_id)
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(
+        current_user.id
+    ):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        return await service.update_payout_account(merchant_id, payout_id, data)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Payout account not found")
+
+
+@router.delete(
+    "/{merchant_id}/payout-accounts/{payout_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_payout_account(
+    merchant_id: str,
+    payout_id: str,
+    current_user: dict = get_current_active_user_depends,
+    service: MerchantService = get_merchant_service_depends,
+):
+    """Deactivate (soft-delete) a payout account."""
+    merchant = await service.get_merchant(merchant_id)
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(
+        current_user.id
+    ):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        await service.delete_payout_account(merchant_id, payout_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Payout account not found")
+    return None
 
 
 # Include the router in the main app

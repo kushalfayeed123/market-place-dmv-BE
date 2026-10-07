@@ -3,10 +3,10 @@
 Pydantic schemas for merchants requests and responses.
 """
 
-from pydantic import BaseModel, Field
-from typing import Optional
 from datetime import datetime
 from enum import Enum as PyEnum
+
+from pydantic import BaseModel, Field
 
 
 class KycStatus(PyEnum):
@@ -20,57 +20,47 @@ class MerchantCreate(BaseModel):
     owner_user_id: str
     business_name: str = Field(..., min_length=1)
     slug: str = Field(..., min_length=1)
-    kyc_status: Optional[KycStatus] = None
-    kyc_provider_ref: Optional[str] = None
+    kyc_status: KycStatus | None = None
+    kyc_provider_ref: str | None = None
     commission_plan_id: str
 
     # Merchant address fields
-    address_line1: Optional[str] = None
-    address_line2: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    postal_code: Optional[str] = None
-    country: Optional[str] = None  # ISO 3166-1 alpha-2
+    address_line1: str | None = None
+    address_line2: str | None = None
+    city: str | None = None
+    state: str | None = None
+    postal_code: str | None = None
+    country: str | None = None  # ISO 3166-1 alpha-2
 
 
 class MerchantOnboard(BaseModel):
-    """
-    Schema for the self-service onboarding flow.
-
-    Used by the currently authenticated ``merchant_owner`` to create their
-    own merchant (and primary store) record.  Unlike :class:`MerchantCreate`
-    the endpoint derives ``owner_user_id`` from the JWT and
-    ``commission_plan_id`` from the default commission plan, so the caller
-    never has to supply those values.
-    """
-
-    business_name: str = Field(..., min_length=1, max_length=255)
-    slug: str = Field(..., min_length=1, max_length=255)
-
-    # Merchant address fields
-    address_line1: Optional[str] = None
-    address_line2: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    postal_code: Optional[str] = None
-    country: Optional[str] = None  # ISO 3166-1 alpha-2
+    business_name: str
+    slug: str
+    address_line1: str | None = None
+    address_line2: str | None = None
+    city: str | None = Field(default=None, max_length=100)
+    state: str | None = Field(default=None, max_length=100)
+    postal_code: str | None = Field(default=None, max_length=20)
+    country: str | None = Field(
+        default=None, min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$"
+    )
 
 
 class MerchantUpdate(BaseModel):
     """Partial-update schema for PUT /{merchant_id}."""
 
-    business_name: Optional[str] = Field(default=None, min_length=1)
-    slug: Optional[str] = Field(default=None, min_length=1)
-    kyc_status: Optional[KycStatus] = None
-    kyc_provider_ref: Optional[str] = None
+    business_name: str | None = Field(default=None, min_length=1)
+    slug: str | None = Field(default=None, min_length=1)
+    kyc_status: KycStatus | None = None
+    kyc_provider_ref: str | None = None
 
     # Merchant address fields
-    address_line1: Optional[str] = None
-    address_line2: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    postal_code: Optional[str] = None
-    country: Optional[str] = None
+    address_line1: str | None = None
+    address_line2: str | None = None
+    city: str | None = None
+    state: str | None = None
+    postal_code: str | None = None
+    country: str | None = None
 
 
 class MerchantResponse(BaseModel):
@@ -79,16 +69,16 @@ class MerchantResponse(BaseModel):
     business_name: str
     slug: str
     kyc_status: str
-    kyc_provider_ref: Optional[str] = None
+    kyc_provider_ref: str | None = None
     commission_plan_id: str
 
     # Merchant address fields
-    address_line1: Optional[str] = None
-    address_line2: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    postal_code: Optional[str] = None
-    country: Optional[str] = None
+    address_line1: str | None = None
+    address_line2: str | None = None
+    city: str | None = None
+    state: str | None = None
+    postal_code: str | None = None
+    country: str | None = None
 
     created_at: datetime
     updated_at: datetime
@@ -100,26 +90,26 @@ class MerchantPayoutAccountCreate(BaseModel):
     provider: str = Field(..., min_length=1, max_length=50)
     currency: str = Field(..., min_length=3, max_length=3)
     external_ref: str = Field(..., min_length=1)
-    account_last4: Optional[str] = None
-    bank_name: Optional[str] = None
-    account_holder_name: Optional[str] = None
-    bank_code: Optional[str] = None
-    routing_number: Optional[str] = None
-    account_type: Optional[str] = None
-    country: Optional[str] = None  # ISO 3166-1 alpha-2
+    account_last4: str | None = None
+    bank_name: str | None = None
+    account_holder_name: str | None = None
+    bank_code: str | None = None
+    routing_number: str | None = None
+    account_type: str | None = None
+    country: str | None = None  # ISO 3166-1 alpha-2
 
 
 class MerchantPayoutAccountUpdate(BaseModel):
     """Partial-update schema for payout account."""
 
-    account_last4: Optional[str] = None
-    bank_name: Optional[str] = None
-    account_holder_name: Optional[str] = None
-    bank_code: Optional[str] = None
-    routing_number: Optional[str] = None
-    account_type: Optional[str] = None
-    country: Optional[str] = None
-    is_active: Optional[bool] = None
+    account_last4: str | None = None
+    bank_name: str | None = None
+    account_holder_name: str | None = None
+    bank_code: str | None = None
+    routing_number: str | None = None
+    account_type: str | None = None
+    country: str | None = None
+    is_active: bool | None = None
 
 
 class MerchantPayoutAccountResponse(BaseModel):
@@ -128,15 +118,51 @@ class MerchantPayoutAccountResponse(BaseModel):
     provider: str
     currency: str
     external_ref: str
-    account_last4: Optional[str] = None
-    bank_name: Optional[str] = None
-    account_holder_name: Optional[str] = None
-    bank_code: Optional[str] = None
-    routing_number: Optional[str] = None
-    account_type: Optional[str] = None
-    country: Optional[str] = None
+    account_last4: str | None = None
+    bank_name: str | None = None
+    account_holder_name: str | None = None
+    bank_code: str | None = None
+    routing_number: str | None = None
+    account_type: str | None = None
+    country: str | None = None
     is_active: bool
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PayoutCreate(BaseModel):
+    """Schema for requesting a payout (merchant withdrawal)."""
+
+    amount: int = Field(..., gt=0, description="Amount in minor units (e.g. kobo)")
+    currency: str = Field(default="NGN", min_length=3, max_length=3)
+    bank_account_last4: str | None = None
+    bank_name: str | None = None
+
+
+class PayoutResponse(BaseModel):
+    """Response schema for a payout request."""
+
+    id: str
+    merchant_id: str
+    amount: int  # Minor units
+    currency: str
+    status: str
+    reference: str
+    bank_account_last4: str | None = None
+    bank_name: str | None = None
+    requested_at: datetime | None = None
+    processed_at: datetime | None = None
+    paid_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class KycReviewRequest(BaseModel):
+    """Schema for admin KYC review."""
+
+    kyc_status: str = Field(..., pattern="^(pending|test_mode|verified|rejected)$")
+    reason: str | None = None

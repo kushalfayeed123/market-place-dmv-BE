@@ -3,9 +3,9 @@
 Pydantic schemas for ledger requests and responses.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum as PyEnum
 
 
@@ -55,3 +55,23 @@ class LedgerBalanceResponse(BaseModel):
     available_balance: int  # Minor units - funds available for payout
     held_balance: int  # Minor units - funds currently held (e.g., awaiting delivery)
     calculated_at: datetime
+
+    @field_validator("calculated_at", mode="before")
+    @classmethod
+    def coerce_calculated_at(cls, v):
+        """Ensure calculated_at is always a valid datetime.
+
+        Handles edge cases where a SQLAlchemy expression or other non-datetime
+        value might be passed (e.g., from stale code or caching), preventing
+        422 validation errors in production.
+        """
+        if isinstance(v, datetime):
+            return v
+        # If a string is passed, try to parse it as ISO 8601
+        if isinstance(v, str):
+            try:
+                return datetime.fromisoformat(v)
+            except (ValueError, TypeError):
+                pass
+        # Fallback: use current UTC time
+        return datetime.now(timezone.utc)

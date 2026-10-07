@@ -4,10 +4,6 @@ Concrete implementation of the merchant service.
 Handles database operations for merchants using SQLAlchemy.
 """
 
-
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.security import (
     to_uuid,
 )
@@ -25,12 +21,15 @@ from app.schemas.merchants import (
     MerchantResponse,
     MerchantUpdate,
 )
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class MerchantServiceImpl(MerchantService):
     """
     Database-backed implementation of MerchantService.
-    
+
     This class encapsulates all database operations for merchants,
     using SQLAlchemy's AsyncSession for query execution.
     """
@@ -38,7 +37,7 @@ class MerchantServiceImpl(MerchantService):
     def __init__(self, db: AsyncSession):
         """
         Initialize the service with a database session.
-        
+
         Args:
             db: The async SQLAlchemy session to use for queries.
         """
@@ -47,10 +46,10 @@ class MerchantServiceImpl(MerchantService):
     async def create_merchant(self, merchant_data: MerchantCreate) -> MerchantResponse:
         """
         Create a new merchant in the database.
-        
+
         Args:
             merchant_data: The merchant data to create.
-            
+
         Returns:
             The created merchant response.
         """
@@ -101,7 +100,14 @@ class MerchantServiceImpl(MerchantService):
                         or if no default commission plan is configured.
         """
         owner_uuid = to_uuid(user_id)
-
+        taken = await self._db.execute(
+            select(Merchant.id).where(Merchant.slug == data.slug)
+        )
+        taken_store = await self._db.execute(
+            select(Store.id).where(Store.slug == data.slug)
+        )
+        if taken.first() or taken_store.first():
+            raise ValueError("That store name is already taken")
         # Idempotency: refuse to create a second merchant for the same owner
         existing = await self._db.execute(
             select(Merchant).where(Merchant.owner_user_id == owner_uuid)
@@ -131,36 +137,38 @@ class MerchantServiceImpl(MerchantService):
             postal_code=data.postal_code,
             country=data.country,
         )
-        self._db.add(new_merchant)
-        await self._db.commit()
-        await self._db.refresh(new_merchant)
+        try:
+            self._db.add(new_merchant)
+            await self._db.flush()  # assigns the id, no commit yet
 
-        # Create a primary store so the merchant can immediately
-        # accept product listings and orders.
-        new_store = Store(
-            merchant_id=new_merchant.id,
-            name=data.business_name,
-            slug=data.slug,
-        )
-        self._db.add(new_store)
-        await self._db.commit()
+            self._db.add(
+                Store(
+                    merchant_id=new_merchant.id, name=data.business_name, slug=data.slug
+                )
+            )
+            await self._db.commit()
+        except IntegrityError:
+            await self._db.rollback()
+            raise ValueError("That store name is already taken")
+
+        await self._db.refresh(new_merchant)
 
         return self._to_response(new_merchant)
 
-    async def list_merchants(self, skip: int = 0, limit: int = 100) -> list[MerchantResponse]:
+    async def list_merchants(
+        self, skip: int = 0, limit: int = 100
+    ) -> list[MerchantResponse]:
         """
         List merchants with pagination from the database.
-        
+
         Args:
             skip: Number of records to skip.
             limit: Maximum number of records to return.
-            
+
         Returns:
             List of merchant responses.
         """
-        result = await self._db.execute(
-            select(Merchant).offset(skip).limit(limit)
-        )
+        result = await self._db.execute(select(Merchant).offset(skip).limit(limit))
         merchants = result.scalars().all()
 
         return [self._to_response(merchant) for merchant in merchants]
@@ -168,10 +176,10 @@ class MerchantServiceImpl(MerchantService):
     async def get_merchant(self, merchant_id: str) -> MerchantResponse | None:
         """
         Get a merchant by ID from the database.
-        
+
         Args:
             merchant_id: The unique identifier of the merchant.
-            
+
         Returns:
             The merchant response if found, None otherwise.
         """
@@ -189,10 +197,10 @@ class MerchantServiceImpl(MerchantService):
     def _to_response(merchant: Merchant) -> MerchantResponse:
         """
         Convert a Merchant model instance to a MerchantResponse schema.
-        
+
         Args:
             merchant: The SQLAlchemy Merchant model instance.
-            
+
         Returns:
             The merchant response schema.
         """
@@ -277,7 +285,9 @@ class MerchantServiceImpl(MerchantService):
         return [self._to_payout_response(a) for a in accounts]
 
     @staticmethod
-    def _to_payout_response(account: MerchantPayoutAccount) -> MerchantPayoutAccountResponse:
+    def _to_payout_response(
+        account: MerchantPayoutAccount,
+    ) -> MerchantPayoutAccountResponse:
         """Convert a MerchantPayoutAccount model to a response schema."""
         return MerchantPayoutAccountResponse(
             id=str(account.id),

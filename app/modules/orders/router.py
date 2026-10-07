@@ -19,6 +19,9 @@ from app.schemas.orders import (
     CheckoutRequest,
     CheckoutResponse,
     OrderResponse,
+    ProofOfPaymentRequest,
+    ProofOfPaymentResponse,
+    OrderApprovalResponse,
 )
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
@@ -221,7 +224,7 @@ async def list_merchant_orders(
         # For now, we'll allow if the ID matches
         pass
     
-    return await service.list_orders(
+        return await service.list_orders(
         skip=skip,
         limit=limit,
         status=status,
@@ -229,6 +232,121 @@ async def list_merchant_orders(
         user_role=current_user.role.value,
         user_id=str(current_user.id),
     )
+
+
+@router.post("/{order_id}/proof-of-payment", response_model=ProofOfPaymentResponse)
+async def submit_proof_of_payment(
+    request: Request,
+    order_id: str,
+    proof_data: ProofOfPaymentRequest,
+    current_user: dict = get_current_active_user_depends,
+    service: OrderService = get_order_service_depends,
+    notification_service: NotificationService = get_notification_service_depends,
+    idempotency: dict = get_idempotency_depends,
+):
+    """Submit proof of payment for an order (offline / bank transfer).
+
+    Creates a payment transaction with status 'pending_verification',
+    records ledger entries, and transitions the order to 'awaiting_approval'
+    so the merchant can review the proof before approving.
+    """
+    if current_user.role.value not in ("buyer", "platform_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only buyers can submit proof of payment",
+        )
+
+    try:
+        response_data = await service.submit_proof_of_payment(
+            order_id, str(current_user.id), proof_data
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        )
+
+    # Notify the merchant that proof was submitted
+    order = await service.get_order(order_id)
+    if order and order.items:
+        merchant_id = order.items[0].get("merchant_id")
+        if merchant_id:
+            await notification_service.create_notification(
+                NotificationCreate(
+                    merchant_id=merchant_id,
+                    type="proof_of_payment_submitted",
+                    subject=f"Proof of payment for order {response_data.order_number}",
+                    body="A buyer has submitted proof of payment. Please review and approve.",
+                    related_order_id=order_id,
+                )
+            )
+
+    await finalize_idempotency(
+        request, None, status_code=status.HTTP_200_OK,
+        response_body=response_data.model_dump(),
+    )
+    return response_data
+
+
+@router.post("/{order_id}/approve", response_model=OrderApprovalResponse)
+async def approve_order(
+    request: Request,
+    order_id: str,
+    merchant_id: str | None = None,
+    current_user: dict = get_current_active_user_depends,
+    service: OrderService = get_order_service_depends,
+    merchant_service: MerchantService = get_merchant_service_depends,
+    notification_service: NotificationService = get_notification_service_depends,
+    idempotency: dict = get_idempotency_depends,
+):
+    """Merchant approves an order with proof of payment on file.
+
+    Transitions the order to 'paid', creates the payout-release ledger entry,
+    and notifies the buyer.
+    """
+    if current_user.role.value not in ("merchant_owner", "merchant_staff", "platform_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only merchants can approve orders",
+        )
+
+    # Resolve merchant_id for the current user
+    resolved_merchant_id = merchant_id
+    if current_user.role.value == "merchant_owner":
+        merchant = await merchant_service.get_merchant_by_owner(str(current_user.id))
+        if merchant:
+            resolved_merchant_id = str(merchant.id)
+
+    if not resolved_merchant_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Could not determine merchant for this user",
+        )
+
+    try:
+        response_data = await service.approve_order(order_id, resolved_merchant_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        )
+
+    # Notify the buyer
+    order = await service.get_order(order_id)
+    if order:
+        await notification_service.create_notification(
+            NotificationCreate(
+                user_id=str(order.buyer_id),
+                type="order_approved",
+                subject=f"Order {response_data.order_number} approved",
+                body="Your order has been approved by the merchant.",
+                related_order_id=order_id,
+            )
+        )
+
+    await finalize_idempotency(
+        request, None, status_code=status.HTTP_200_OK,
+        response_body=response_data.model_dump(),
+    )
+    return response_data
 
 
 # Include the router in the main app

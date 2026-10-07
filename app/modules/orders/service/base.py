@@ -10,6 +10,9 @@ from app.schemas.orders import (
     CheckoutRequest,
     CheckoutResponse,
     OrderResponse,
+    ProofOfPaymentRequest,
+    ProofOfPaymentResponse,
+    OrderApprovalResponse,
 )
 
 
@@ -75,5 +78,58 @@ class OrderService(ABC):
             
         Returns:
             List of order responses.
+        """
+        ...
+
+    @abstractmethod
+    async def submit_proof_of_payment(
+        self,
+        order_id: str,
+        buyer_id: str,
+        proof_data: ProofOfPaymentRequest,
+    ) -> ProofOfPaymentResponse:
+        """
+        Record proof of payment for an order (offline / bank transfer).
+
+        Creates a PaymentTransaction with status 'pending_verification',
+        a hold ledger entry, and transitions the order to
+        'awaiting_approval'.
+
+        Args:
+            order_id: The order ID.
+            buyer_id: The buyer's user ID (must own the order).
+            proof_data: Proof-of-payment payload (image URL, provider, reference).
+
+        Returns:
+            Proof-of-payment response with the new status.
+
+        Raises:
+            ValueError: If the order is not found, not owned by the buyer,
+                        or already has a pending proof.
+        """
+        ...
+
+    @abstractmethod
+    async def approve_order(
+        self,
+        order_id: str,
+        merchant_id: str,
+    ) -> OrderApprovalResponse:
+        """
+        Merchant approves an order that has proof of payment on file.
+
+        Transitions the order to 'paid', creates the payout-release ledger
+        entry, and notifies the buyer.
+
+        Args:
+            order_id: The order ID.
+            merchant_id: The merchant's ID (must own the order items).
+
+        Returns:
+            Approval response with the new status.
+
+        Raises:
+            ValueError: If the order is not found, not owned by the merchant,
+                        or not in 'awaiting_approval' status.
         """
         ...

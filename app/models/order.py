@@ -19,6 +19,7 @@ class OrderStatus(PyEnum):
     FULFILLED = "fulfilled"
     CANCELLED = "cancelled"
     REFUNDED = "refunded"
+    AWAITING_APPROVAL = "awaiting_approval"
 
 
 class Order(BaseModel):

@@ -5,6 +5,8 @@ Communicates with the service layer via the PaymentService abstraction.
 """
 
 
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
 from app.core.security import get_current_active_user
 from app.modules.merchants.service.base import MerchantService
@@ -19,7 +21,6 @@ from app.schemas.payments import (
     WebhookPayload,
     WebhookResponse,
 )
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 router = APIRouter()
 
@@ -125,9 +126,10 @@ async def get_payment(
 
     # Authorization check: buyer can only see their own order's payment
     # merchant/admin can see payments for their orders
-    from app.models.order import Order
     from sqlalchemy import select
+
     from app.core.security import to_uuid
+    from app.models.order import Order
 
     order_result = await service._db.execute(
         select(Order).where(Order.id == to_uuid(payment.order_id))

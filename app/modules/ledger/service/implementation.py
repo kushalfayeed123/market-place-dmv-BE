@@ -4,10 +4,8 @@ Concrete implementation of the ledger service.
 Handles database operations for ledger using SQLAlchemy.
 """
 
-
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.functions import func
 
 from app.core.security import (
     to_uuid,
@@ -78,9 +76,11 @@ class LedgerServiceImpl(LedgerService):
         if user_role == "buyer":
             # Buyers can only see ledger entries related to their orders
             buyer_orders_result = await self._db.execute(
-                select(Order.id).where(Order.buyer_id == user_id)
+                select(Order.id).where(Order.buyer_id == to_uuid(user_id))
             )
-            buyer_order_ids = [str(row[0]) for row in buyer_orders_result.fetchall()]
+            buyer_order_ids = [
+                to_uuid(str(row[0])) for row in buyer_orders_result.fetchall()
+            ]
 
             if buyer_order_ids:
                 query = query.where(LedgerEntry.order_id.in_(buyer_order_ids))
@@ -88,18 +88,20 @@ class LedgerServiceImpl(LedgerService):
                 return []
 
         elif user_role in ["merchant_owner", "merchant_staff"]:
-            # Merchants can only see ledger entries related to their merchant wallet
-            merchant_id_from_token = user_id  # Simplified - in practice would lookup merchant_id
-            if merchant_id_from_token:
-                query = query.where(LedgerEntry.merchant_id == merchant_id_from_token)
+            # Merchants can only see ledger entries related to their merchant wallet.
+            # Enforce token-based merchant ID, overriding/setting the filter parameter.
+            if user_id:
+                merchant_id = user_id
             else:
                 return []
 
-        # Platform admins see all entries (no additional filtering)
+        elif user_role == "admin":
+            # Platform admins see all entries, but can optionally filter by merchant_id if provided
+            pass
 
-        # Apply additional filters
+        # Apply additional filters (merchant_id is now safely managed per role above)
         if merchant_id:
-            query = query.where(LedgerEntry.merchant_id == merchant_id)
+            query = query.where(LedgerEntry.merchant_id == to_uuid(merchant_id))
         if entry_type:
             query = query.where(LedgerEntry.entry_type == entry_type)
         if account_type:
@@ -111,7 +113,7 @@ class LedgerServiceImpl(LedgerService):
         if max_amount is not None:
             query = query.where(LedgerEntry.amount <= max_amount)
         if order_id:
-            query = query.where(LedgerEntry.order_id == order_id)
+            query = query.where(LedgerEntry.order_id == to_uuid(order_id))
 
         query = query.offset(skip).limit(limit)
         result = await self._db.execute(query)
@@ -130,7 +132,7 @@ class LedgerServiceImpl(LedgerService):
             The ledger entry response if found, None otherwise.
         """
         result = await self._db.execute(
-            select(LedgerEntry).where(LedgerEntry.id == entry_id)
+            select(LedgerEntry).where(LedgerEntry.id == to_uuid(entry_id))
         )
         entry = result.scalar_one_or_none()
 
@@ -186,7 +188,7 @@ class LedgerServiceImpl(LedgerService):
 
         result = await self._db.execute(
             text(balance_query),
-            {"merchant_id": merchant_id},
+            {"merchant_id": to_uuid(merchant_id).hex},
         )
         balance_row = result.fetchone()
         balance = balance_row[0] if balance_row and balance_row[0] is not None else 0
@@ -215,7 +217,7 @@ class LedgerServiceImpl(LedgerService):
 
         result = await self._db.execute(
             text(held_query),
-            {"merchant_id": merchant_id},
+            {"merchant_id": to_uuid(merchant_id).hex},
         )
         held_row = result.fetchone()
         held_balance = held_row[0] if held_row and held_row[0] is not None else 0
@@ -223,13 +225,18 @@ class LedgerServiceImpl(LedgerService):
         # Calculate available balance (total - held)
         available_balance = balance - held_balance
 
+        # Fetch current timestamp from the database to ensure a proper datetime
+        # object (avoids timezone mismatches with MySQL DATETIME)
+        db_now_result = await self._db.execute(select(func.now()))
+        calculated_at = db_now_result.scalar()
+
         return LedgerBalanceResponse(
             merchant_id=merchant_id,
             currency=currency,
             total_balance=balance,
             available_balance=available_balance,
             held_balance=held_balance,
-            calculated_at=func.now(),
+            calculated_at=calculated_at,
         )
 
     @staticmethod

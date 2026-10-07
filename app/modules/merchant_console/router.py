@@ -28,7 +28,10 @@ verify ownership; resource actions verify ownership via the resource's
 merchant FK.
 """
 
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -36,16 +39,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_active_user, to_uuid
 from app.db.session import get_db
+from app.models.conversation import Conversation
+from app.models.dispute import Dispute
+from app.models.fulfillment import Fulfillment
+from app.models.inventory import Inventory
 from app.models.merchant import Merchant
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
+from app.models.payout import Payout
 from app.models.product import Product, ProductStatus
 from app.models.product_variant import ProductVariant
-from app.models.inventory import Inventory
-from app.models.fulfillment import Fulfillment
-from app.models.payout import Payout
-from app.models.dispute import Dispute
-from app.models.conversation import Conversation
 from app.models.user import User, UserRole
 from app.schemas.merchant_console import (
     AttentionResponse,
@@ -56,6 +59,7 @@ from app.schemas.merchant_console import (
     MerchantShipmentListItem,
     PayoutListItem,
 )
+from app.schemas.merchants import KycReviewRequest, PayoutCreate, PayoutResponse
 
 router = APIRouter()
 
@@ -122,7 +126,7 @@ async def get_merchant_attention(
         .select_from(Dispute)
         .where(Dispute.merchant_id == mid)
         .where(Dispute.status == "open")
-        .where(Dispute.respond_by > datetime.utcnow())
+        .where(Dispute.respond_by > func.now())
     )
 
     unread_messages = await db.scalar(
@@ -360,7 +364,7 @@ async def list_merchant_payouts(
 ):
     """List payout requests for this merchant."""
     merchant = await _require_merchant_access(merchant_id, current_user, db)
-    mid = merchant.id
+    mid = to_uuid(merchant.id)
 
     q = (
         select(Payout)
@@ -660,7 +664,7 @@ async def mark_delivered(
         raise HTTPException(status_code=400, detail=f"Cannot mark delivered from status '{fulfillment.status}'")
     from app.models.enums import FulfillmentStatus as FS
     fulfillment.status = FS.DELIVERED.value
-    fulfillment.delivered_at = datetime.utcnow()
+    fulfillment.delivered_at = datetime.now(tz=timezone.utc)
     await db.commit()
     await db.refresh(fulfillment)
     return {"ok": True, "shipment_id": shipment_id, "status": fulfillment.status}
@@ -687,6 +691,104 @@ async def cancel_payout(
     await db.commit()
     await db.refresh(payout)
     return {"ok": True, "payout_id": payout_id, "status": payout.status}
+
+
+# ── Payout requests ──────────────────────────────────────────────────────
+
+@router.post(
+    "/merchants/{merchant_id}/payouts",
+    response_model=PayoutResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_payout_request(
+    merchant_id: str,
+    payout_data: PayoutCreate,
+    current_user: User = get_current_active_user_depends,
+    db: AsyncSession = get_db_depends,
+):
+    """Create a payout request for a merchant (withdraw funds)."""
+    merchant = await _require_merchant_access(merchant_id, current_user, db)
+
+    # Must have an active payout account
+    from app.models.merchant_payout_account import MerchantPayoutAccount
+    result = await db.execute(
+        select(MerchantPayoutAccount).where(
+            MerchantPayoutAccount.merchant_id == merchant.id,
+            MerchantPayoutAccount.is_active.is_(True),
+        )
+    )
+    account = result.scalar_one_or_none()
+    if account is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active payout account found. Set up a payout account first.",
+        )
+
+    reference = f"pout_{uuid4().hex[:12]}"
+    new_payout = Payout(
+        merchant_id=merchant.id,
+        amount=payout_data.amount,
+        currency=payout_data.currency,
+        status="requested",
+        reference=reference,
+        bank_account_last4=account.account_last4,
+        bank_name=account.bank_name,
+    )
+    db.add(new_payout)
+    await db.commit()
+    await db.refresh(new_payout)
+
+    return PayoutResponse(
+        id=str(new_payout.id),
+        merchant_id=str(new_payout.merchant_id),
+        amount=new_payout.amount,
+        currency=new_payout.currency,
+        status=new_payout.status,
+        reference=new_payout.reference,
+        bank_account_last4=new_payout.bank_account_last4,
+        bank_name=new_payout.bank_name,
+        requested_at=new_payout.requested_at,
+        processed_at=new_payout.processed_at,
+        paid_at=new_payout.paid_at,
+        created_at=new_payout.created_at,
+        updated_at=new_payout.updated_at,
+    )
+
+
+# ── Admin KYC review ────────────────────────────────────────────────────
+
+@router.patch(
+    "/admin/merchants/{merchant_id}/kyc",
+    response_model=dict[str, Any],
+)
+async def review_merchant_kyc(
+    merchant_id: str,
+    kyc_data: KycReviewRequest,
+    current_user: User = get_current_active_user_depends,
+    db: AsyncSession = get_db_depends,
+):
+    """Admin-only: review a merchant's KYC status."""
+    if current_user.role != UserRole.PLATFORM_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform admins can review KYC",
+        )
+    merchant = await db.get(Merchant, to_uuid(merchant_id))
+    if not merchant:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+    merchant.kyc_status = kyc_data.kyc_status
+    if kyc_data.reason:
+        merchant.kyc_provider_ref = (merchant.kyc_provider_ref or "") + f" | {kyc_data.reason}"
+    await db.commit()
+    await db.refresh(merchant)
+    return {
+        "merchant_id": str(merchant.id),
+        "kyc_status": merchant.kyc_status,
+        "reason": kyc_data.reason,
+    }
 
 
 # ── Dispute actions ──────────────────────────────────────────────────────
