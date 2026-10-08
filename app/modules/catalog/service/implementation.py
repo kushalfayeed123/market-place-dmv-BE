@@ -174,7 +174,7 @@ class CatalogServiceImpl(CatalogService):
             attributes = product_data.attributes or {}
             self._validate_attributes(attributes, schema)
         
-        new_product = Product(
+                new_product = Product(
             merchant_id=to_uuid(product_data.merchant_id),
             store_id=to_uuid(product_data.store_id),
             category_id=category_uuid,
@@ -185,7 +185,7 @@ class CatalogServiceImpl(CatalogService):
             status=product_data.status or ProductStatus.DRAFT,
             base_price_amount=product_data.base_price_amount,
             base_price_currency=product_data.base_price_currency,
-                        attributes=json.dumps(product_data.attributes or {}),
+            attributes=json.dumps(product_data.attributes or {}),
             urls=json.dumps(product_data.urls or []),
         )
 

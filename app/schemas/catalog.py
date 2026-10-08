@@ -23,18 +23,22 @@ class CategoryResponse(BaseModel):
 
 
 class ProductCreate(BaseModel):
-    merchant_id: str
-    store_id: str
+    # merchant_id / store_id are optional — when omitted they are looked up
+    # from the authenticated user's merchant + primary store in the router.
+    merchant_id: str | None = None
+    store_id: str | None = None
     category_id: str | None = None
     title: str = Field(..., min_length=1)
-    slug: str = Field(..., min_length=1)
+    slug: str | None = None  # Auto-generated from title when not supplied
     description: str | None = None
-    fulfillment_type: str = Field(..., pattern="^(physical|digital|service)$")
+    fulfillment_type: str = Field(default="physical", pattern="^(physical|digital|service)$")
     status: str | None = Field(None, pattern="^(draft|active|suspended)$")
     base_price_amount: int = Field(..., ge=0)  # Minor units
     base_price_currency: str = Field(default="NGN", min_length=3, max_length=3)
     attributes: dict[str, Any] | None = {}
     urls: list[str] | None = None
+
+    model_config = {"validate_assignment": True, "extra": "forbid"}
 
 
 class ProductResponse(BaseModel):

@@ -10,7 +10,11 @@ import uuid
 from pathlib import Path
 
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
-from app.core.security import get_current_active_user
+from app.core.security import get_current_active_user, to_uuid
+from app.db.session import get_db
+from app.models.merchant import Merchant
+from app.models.store import Store
+from app.models.user import UserRole
 from app.modules.catalog.service.base import CatalogService
 from app.modules.catalog.service.dependency import get_catalog_service
 from app.schemas.catalog import (
@@ -23,6 +27,8 @@ from app.schemas.catalog import (
     ProductVariantResponse,
 )
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 
@@ -34,6 +40,7 @@ UPLOAD_DIR = Path(__file__).resolve().parents[3] / "static" / "uploads" / "produ
 get_current_active_user_depends = Depends(get_current_active_user)
 get_idempotency_depends = Depends(get_idempotency_dependency)
 get_catalog_service_depends = Depends(get_catalog_service)
+get_db_depends = Depends(get_db)
 
 
 # Category endpoints
@@ -100,14 +107,58 @@ async def create_product(
     current_user: dict = get_current_active_user_depends,
     service: CatalogService = get_catalog_service_depends,
     idempotency: dict = get_idempotency_depends,
+    db: AsyncSession = get_db_depends,
 ):
-    """Create a new product."""
+    """Create a new product.
+
+    If ``merchant_id`` / ``store_id`` are omitted they are derived from the
+    authenticated user's merchant and primary store.  ``slug`` is auto-generated
+    from ``title`` when not supplied.
+    """
     # Verify user has permission
     if current_user.role.value not in ["merchant_owner", "merchant_staff", "platform_admin"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Insufficient permissions",
         )
+
+    # ── Derive merchant_id from the authenticated user when not supplied ──
+    if product_data.merchant_id is None:
+        if current_user.role.value == UserRole.PLATFORM_ADMIN.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="merchant_id is required when creating as platform_admin",
+            )
+        result = await db.execute(
+            select(Merchant).where(Merchant.owner_user_id == current_user.id)
+        )
+        merchant = result.scalar_one_or_none()
+        if merchant is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No merchant account found for this user",
+            )
+        product_data = product_data.model_copy(update={"merchant_id": str(merchant.id)})
+
+    # ── Derive store_id (primary store) when not supplied ──
+    if product_data.store_id is None:
+        result = await db.execute(
+            select(Store).where(Store.merchant_id == to_uuid(product_data.merchant_id)).limit(1)
+        )
+        store = result.scalar_one_or_none()
+        if store is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No store found for merchant '{product_data.merchant_id}'",
+            )
+        product_data = product_data.model_copy(update={"store_id": str(store.id)})
+
+    # ── Auto-generate slug from title when not supplied ──
+    if product_data.slug is None:
+        import re
+        base = re.sub(r"[^a-zA-Z0-9]+", "-", product_data.title.lower()).strip("-")
+        slug = base[:100] if base else "product"
+        product_data = product_data.model_copy(update={"slug": slug})
 
     try:
         response_data = await service.create_product(product_data)
