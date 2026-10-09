@@ -16,6 +16,7 @@ from app.models.store import Store
 from app.models.inventory import Inventory
 from app.models.product import Product, ProductStatus
 from app.models.product_attribute_schema import ProductAttributeSchema
+from app.models.product_like import ProductLike
 from app.models.product_variant import ProductVariant
 from app.modules.catalog.service.base import CatalogService
 from app.schemas.catalog import (
@@ -24,6 +25,7 @@ from app.schemas.catalog import (
     InventoryUpdate,
     ProductCreate,
     ProductResponse,
+    ProductUpdate,
     ProductVariantCreate,
     ProductVariantResponse,
 )
@@ -141,40 +143,39 @@ class CatalogServiceImpl(CatalogService):
         """
         import json
         
-        # Validate category_id is provided
-        if not product_data.category_id:
-            raise ValueError("category_id is required to create a product")
-        
-        try:
-            category_uuid = to_uuid(product_data.category_id)
-        except ValueError:
-            raise ValueError(f"Invalid category_id format: '{product_data.category_id}'")
-        
-        # Verify category exists
-        result = await self._db.execute(
-            select(Category).where(Category.id == category_uuid)
-        )
-        if result.scalar_one_or_none() is None:
-            raise ValueError(f"Category with id '{product_data.category_id}' does not exist")
-        
-        # Check if category has an attribute schema and validate
-        result = await self._db.execute(
-            select(ProductAttributeSchema).where(ProductAttributeSchema.category_id == category_uuid)
-        )
-        attribute_schema = result.scalar_one_or_none()
-        
-        if attribute_schema:
-            # Parse the schema from JSON string
+        # Validate and look up category when provided (category_id is nullable in the model)
+        category_uuid = None
+        if product_data.category_id:
             try:
-                schema = json.loads(attribute_schema.schema) if isinstance(attribute_schema.schema, str) else attribute_schema.schema
-            except (json.JSONDecodeError, TypeError):
-                schema = {}
+                category_uuid = to_uuid(product_data.category_id)
+            except ValueError:
+                raise ValueError(f"Invalid category_id format: '{product_data.category_id}'")
             
-            # Validate attributes against schema
-            attributes = product_data.attributes or {}
-            self._validate_attributes(attributes, schema)
+            # Verify category exists
+            result = await self._db.execute(
+                select(Category).where(Category.id == category_uuid)
+            )
+            if result.scalar_one_or_none() is None:
+                raise ValueError(f"Category with id '{product_data.category_id}' does not exist")
+            
+            # Check if category has an attribute schema and validate
+            result = await self._db.execute(
+                select(ProductAttributeSchema).where(ProductAttributeSchema.category_id == category_uuid)
+            )
+            attribute_schema = result.scalar_one_or_none()
+            
+            if attribute_schema:
+                # Parse the schema from JSON string
+                try:
+                    schema = json.loads(attribute_schema.schema) if isinstance(attribute_schema.schema, str) else attribute_schema.schema
+                except (json.JSONDecodeError, TypeError):
+                    schema = {}
+                
+                # Validate attributes against schema
+                attributes = product_data.attributes or {}
+                self._validate_attributes(attributes, schema)
         
-                new_product = Product(
+        new_product = Product(
             merchant_id=to_uuid(product_data.merchant_id),
             store_id=to_uuid(product_data.store_id),
             category_id=category_uuid,
@@ -507,6 +508,159 @@ class CatalogServiceImpl(CatalogService):
             "quantity_reserved": inventory.quantity_reserved,
             "updated_at": inventory.updated_at.isoformat(),
         }
+
+    async def update_product(
+        self, product_id: str, product_data: ProductUpdate
+    ) -> ProductResponse:
+        """
+        Partially update a product.
+
+        Only fields that are not None on ``product_data`` are applied.
+        ``category_id`` is validated (must exist) when provided.
+        """
+        import json as _json
+
+        # Look up the product
+        try:
+            product_uuid = to_uuid(product_id)
+        except ValueError:
+            raise ValueError(f"Invalid product_id format: '{product_id}'")
+
+        result = await self._db.execute(
+            select(Product).where(Product.id == product_uuid)
+        )
+        product = result.scalar_one_or_none()
+        if product is None:
+            raise ValueError(f"Product with id '{product_id}' does not exist")
+
+        update_data = product_data.model_dump(exclude_unset=True, exclude_none=True)
+
+        # Validate + resolve category_id when provided
+        if "category_id" in update_data and update_data["category_id"] is not None:
+            cat_uuid = to_uuid(update_data["category_id"])
+            cat_result = await self._db.execute(
+                select(Category).where(Category.id == cat_uuid)
+            )
+            if cat_result.scalar_one_or_none() is None:
+                raise ValueError(f"Category with id '{update_data['category_id']}' does not exist")
+            update_data["category_id"] = cat_uuid
+
+        # Serialize attributes/urls to JSON strings (text columns)
+        if "attributes" in update_data:
+            update_data["attributes"] = _json.dumps(update_data["attributes"] or {})
+        if "urls" in update_data:
+            update_data["urls"] = _json.dumps(update_data["urls"] or [])
+
+        # Apply the update
+        for key, value in update_data.items():
+            setattr(product, key, value)
+
+        await self._db.commit()
+        await self._db.refresh(product)
+
+        # Return the full response (re-fetch variants + inventory)
+        variants_result = await self._db.execute(
+            select(ProductVariant).where(ProductVariant.product_id == product_uuid)
+        )
+        variants = variants_result.scalars().all()
+        inventory_quantities = await self._inventory_quantities_map(variants)
+        return self._product_to_response(product, variants, inventory_quantities)
+
+    async def like_product(self, user_id: str, product_id: str) -> bool:
+        """
+        Record a like from a user for a product (idempotent).
+        Returns True when a new like was created, False if it already existed.
+        """
+        try:
+            user_uuid = to_uuid(user_id)
+            product_uuid = to_uuid(product_id)
+        except ValueError:
+            raise ValueError("Invalid user_id or product_id format")
+
+        # Verify product exists
+        prod_result = await self._db.execute(
+            select(Product).where(Product.id == product_uuid)
+        )
+        if prod_result.scalar_one_or_none() is None:
+            raise ValueError(f"Product with id '{product_id}' does not exist")
+
+        # Check existing like
+        like_result = await self._db.execute(
+            select(ProductLike).where(
+                ProductLike.user_id == user_uuid,
+                ProductLike.product_id == product_uuid,
+            )
+        )
+        if like_result.scalar_one_or_none() is not None:
+            return False  # Already liked
+
+        like = ProductLike(user_id=user_uuid, product_id=product_uuid)
+        self._db.add(like)
+        await self._db.commit()
+        return True
+
+    async def unlike_product(self, user_id: str, product_id: str) -> bool:
+        """
+        Remove a like from a product.
+        Returns True when a like was deleted, False if it didn't exist.
+        """
+        try:
+            user_uuid = to_uuid(user_id)
+            product_uuid = to_uuid(product_id)
+        except ValueError:
+            raise ValueError("Invalid user_id or product_id format")
+
+        result = await self._db.execute(
+            select(ProductLike).where(
+                ProductLike.user_id == user_uuid,
+                ProductLike.product_id == product_uuid,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            return False
+
+        await self._db.delete(existing)
+        await self._db.commit()
+        return True
+
+    async def get_product_like_count(self, product_id: str, user_id: str | None = None) -> dict:
+        """Get like count for a product and whether the given user has liked it."""
+        from sqlalchemy import func
+
+        try:
+            product_uuid = to_uuid(product_id)
+        except ValueError:
+            raise ValueError(f"Invalid product_id format: '{product_id}'")
+
+        # Verify product exists
+        prod_result = await self._db.execute(
+            select(Product).where(Product.id == product_uuid)
+        )
+        if prod_result.scalar_one_or_none() is None:
+            raise ValueError(f"Product with id '{product_id}' does not exist")
+
+        count_stmt = select(func.count(ProductLike.id)).where(
+            ProductLike.product_id == product_uuid
+        )
+        count_result = await self._db.execute(count_stmt)
+        count = count_result.scalar_one()
+
+        liked = False
+        if user_id is not None:
+            try:
+                user_uuid = to_uuid(user_id)
+                liked_result = await self._db.execute(
+                    select(ProductLike).where(
+                        ProductLike.user_id == user_uuid,
+                        ProductLike.product_id == product_uuid,
+                    )
+                )
+                liked = liked_result.scalar_one_or_none() is not None
+            except ValueError:
+                liked = False
+
+        return {"count": count, "liked": liked}
 
     async def list_product_variants(self, product_id: str) -> list[ProductVariantResponse]:
         """

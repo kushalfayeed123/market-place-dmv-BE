@@ -12,6 +12,7 @@ from app.schemas.catalog import (
     InventoryUpdate,
     ProductCreate,
     ProductResponse,
+    ProductUpdate,
     ProductVariantCreate,
     ProductVariantResponse,
 )
@@ -215,7 +216,74 @@ class CatalogService(ABC):
         Returns:
             Dictionary with updated inventory details.
             
-        Raises:
+                Raises:
             ValueError: If variant not found.
+        """
+        ...
+
+    @abstractmethod
+    async def update_product(
+        self, product_id: str, product_data: ProductUpdate
+    ) -> ProductResponse:
+        """
+        Partially update a product.
+
+        Args:
+            product_id: The product ID.
+            product_data: Fields to update (only non-None values are applied).
+
+        Returns:
+            The updated product response.
+
+        Raises:
+            ValueError: If product not found or category_id is invalid.
+        """
+        ...
+
+    @abstractmethod
+    async def like_product(self, user_id: str, product_id: str) -> bool:
+        """
+        Record a like from a user for a product (idempotent).
+
+        Args:
+            user_id: The user who likes the product.
+            product_id: The product being liked.
+
+        Returns:
+            True if a new like was created, False if it already existed.
+
+        Raises:
+            ValueError: If product not found.
+        """
+        ...
+
+    @abstractmethod
+    async def unlike_product(self, user_id: str, product_id: str) -> bool:
+        """
+        Remove a like from a product.
+
+        Args:
+            user_id: The user who unlikes the product.
+            product_id: The product being unliked.
+
+        Returns:
+            True if a like was deleted, False if it didn't exist.
+
+        Raises:
+            ValueError: If product not found.
+        """
+        ...
+
+    @abstractmethod
+    async def get_product_like_count(self, product_id: str, user_id: str | None = None) -> dict:
+        """
+        Get the like count for a product and whether the given user has liked it.
+
+        Args:
+            product_id: The product ID.
+            user_id: Optional user ID to check if they've liked.
+
+        Returns:
+            Dictionary with 'count' and 'liked' keys.
         """
         ...

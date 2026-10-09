@@ -89,6 +89,34 @@ class InventoryUpdate(BaseModel):
     quantity_reserved: int | None = Field(None, ge=0)
 
 
+class ProductUpdate(BaseModel):
+    """Partial-update schema for products. All fields are optional."""
+    title: str | None = Field(None, min_length=1)
+    slug: str | None = None
+    description: str | None = None
+    category_id: str | None = None
+    fulfillment_type: str | None = Field(None, pattern=r"^(physical|digital|service)$")
+    status: str | None = Field(None, pattern=r"^(draft|active|suspended)$")
+    base_price_amount: int | None = Field(None, ge=0)
+    base_price_currency: str | None = Field(None, min_length=3, max_length=3)
+    attributes: dict[str, Any] | None = None
+    urls: list[str] | None = None
+
+    model_config = {"extra": "forbid"}
+
+
+class ProductLikeResponse(BaseModel):
+    id: str
+    user_id: str
+    product_id: str
+    created_at: datetime
+
+
+class LikeCountResponse(BaseModel):
+    count: int
+    liked: bool
+
+
 class PaginatedResponse(BaseModel):
     items: list
     total: int

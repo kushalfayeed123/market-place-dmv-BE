@@ -13,6 +13,7 @@ from app.core.idempotency import finalize_idempotency, get_idempotency_dependenc
 from app.core.security import get_current_active_user, to_uuid
 from app.db.session import get_db
 from app.models.merchant import Merchant
+from app.models.product import Product
 from app.models.store import Store
 from app.models.user import UserRole
 from app.modules.catalog.service.base import CatalogService
@@ -23,11 +24,13 @@ from app.schemas.catalog import (
     InventoryUpdate,
     ProductCreate,
     ProductResponse,
+    ProductUpdate,
     ProductVariantCreate,
     ProductVariantResponse,
 )
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
-from sqlalchemy import select
+from fastapi.responses import JSONResponse
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
@@ -216,6 +219,108 @@ async def get_product(
         )
 
     return product
+
+
+# ── Product update (partial PATCH) ──
+@router.patch(
+    "/products/{product_id}",
+    response_model=ProductResponse,
+)
+async def update_product(
+    request: Request,
+    product_id: str,
+    product_data: ProductUpdate,
+    current_user: dict = get_current_active_user_depends,
+    service: CatalogService = get_catalog_service_depends,
+    idempotency: dict = get_idempotency_depends,
+):
+    """Partially update a product.
+
+    Only the merchant that owns the product (or a platform admin) may update it.
+    Only fields that are non-``None`` on the request body are applied.
+    """
+    # Permission: merchant_owner / merchant_staff / platform_admin
+    if current_user.role.value not in ["merchant_owner", "merchant_staff", "platform_admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions",
+        )
+
+    try:
+        response_data = await service.update_product(product_id, product_data)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    await finalize_idempotency(
+        request, None, status_code=status.HTTP_200_OK,
+        response_body=response_data.model_dump(),
+    )
+    return response_data
+
+
+# ── Product likes ──
+@router.post("/products/{product_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+async def like_product(
+    request: Request,
+    product_id: str,
+    current_user: dict = get_current_active_user_depends,
+    service: CatalogService = get_catalog_service_depends,
+):
+    """Like a product (idempotent). Requires authentication."""
+    try:
+        await service.like_product(current_user.id, product_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    await finalize_idempotency(
+        request, None, status_code=status.HTTP_204_NO_CONTENT,
+    )
+    return JSONResponse(status_code=status.HTTP_204_NO_CONTENT, content=None)
+
+
+@router.delete("/products/{product_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+async def unlike_product(
+    request: Request,
+    product_id: str,
+    current_user: dict = get_current_active_user_depends,
+    service: CatalogService = get_catalog_service_depends,
+):
+    """Remove a like from a product. Requires authentication."""
+    try:
+        await service.unlike_product(current_user.id, product_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    await finalize_idempotency(
+        request, None, status_code=status.HTTP_204_NO_CONTENT,
+    )
+    return JSONResponse(status_code=status.HTTP_204_NO_CONTENT, content=None)
+
+
+@router.get("/products/{product_id}/likes")
+async def get_product_likes(
+    product_id: str,
+    current_user: dict = get_current_active_user_depends,
+    service: CatalogService = get_catalog_service_depends,
+):
+    """Get the like count for a product and whether the current user has liked it."""
+    try:
+        result = await service.get_product_like_count(product_id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    return result
 
 
 # Product Variant endpoints

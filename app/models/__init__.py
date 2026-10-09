@@ -24,6 +24,7 @@ from app.models.order_item import OrderItem  # noqa: F401
 from app.models.payment_transaction import PaymentTransaction  # noqa: F401
 from app.models.product import Product  # noqa: F401
 from app.models.product_attribute_schema import ProductAttributeSchema  # noqa: F401
+from app.models.product_like import ProductLike  # noqa: F401
 from app.models.product_variant import ProductVariant  # noqa: F401
 from app.models.payout import Payout  # noqa: F401
 from app.models.refresh_token import RefreshToken  # noqa: F401
