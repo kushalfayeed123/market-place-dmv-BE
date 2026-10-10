@@ -2,6 +2,10 @@ FROM python:3.12-slim
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 WORKDIR /app
 
+# Enable bytecode compilation and copy environment settings for uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
 # Install system dependencies for building PostgreSQL extensions
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -11,5 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Adjust "app.main:app" to your module path
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Copy the rest of your application code
+COPY . .
+
+# Use "uv run" to execute uvicorn within the virtual environment path
+CMD ["sh", "-c", "uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
