@@ -260,6 +260,7 @@ See the automatically generated API documentation at `/docs` or `/redoc` for com
 - `POST /api/v1/auth/mfa/setup` - Setup MFA
 - `POST /api/v1/auth/mfa/verify` - Verify MFA token
 - `POST /api/v1/auth/password-reset/request` - Request password reset
+- `POST /api/v1/auth/password-reset/confirm` - Confirm password reset with token
 
 ### Catalog
 - `POST /api/v1/catalog/categories` - Create category

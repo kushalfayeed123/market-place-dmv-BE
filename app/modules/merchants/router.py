@@ -143,29 +143,6 @@ async def get_merchant_by_owner(
     return merchant
 
 
-@router.get("/{merchant_id}", response_model=MerchantResponse)
-async def get_merchant(
-    merchant_id: str,
-    current_user: dict = get_current_active_user_depends,
-    service: MerchantService = get_merchant_service_depends,
-):
-    """Get a merchant by ID."""
-    merchant = await service.get_merchant(merchant_id)
-    if not merchant:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Merchant not found",
-        )
-    if current_user.role.value != "platform_admin" and merchant.owner_user_id != str(
-        current_user.id
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to access this merchant",
-        )
-    return merchant
-
-
 @router.put("/{merchant_id}", response_model=MerchantResponse)
 async def update_merchant(
     merchant_id: str,

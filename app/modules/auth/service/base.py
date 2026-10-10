@@ -10,6 +10,7 @@ from app.schemas.auth import (
     MFASetup,
     MFAVerify,
     PasswordChange,
+    PasswordResetConfirm,
     PasswordResetRequest,
     RefreshTokenRequest,
     TokenResponse,
@@ -131,6 +132,22 @@ class AuthService(ABC):
             
         Raises:
             ValueError: If the current password is incorrect.
+        """
+        ...
+
+    @abstractmethod
+    async def confirm_password_reset(self, confirm_data: PasswordResetConfirm) -> dict:
+        """
+        Confirm a password reset using a reset token.
+
+        Args:
+            confirm_data: The password reset confirmation data (token + new password).
+
+        Returns:
+            Dictionary with response message.
+
+        Raises:
+            ValueError: If the token is invalid or expired.
         """
         ...
 

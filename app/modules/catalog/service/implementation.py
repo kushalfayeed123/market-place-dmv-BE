@@ -436,7 +436,7 @@ class CatalogServiceImpl(CatalogService):
         await self._db.commit()
         await self._db.refresh(new_variant)
 
-                # Create initial inventory record with provided values or defaults
+        # Create initial inventory record with provided values or defaults
         inventory = Inventory(
             variant_id=new_variant.id,
             quantity_available=variant_data.quantity_available or 0,
@@ -444,7 +444,6 @@ class CatalogServiceImpl(CatalogService):
         )
         self._db.add(inventory)
         await self._db.commit()
-
 
         return self._variant_to_response(new_variant)
 
@@ -822,7 +821,7 @@ class CatalogServiceImpl(CatalogService):
             status=product.status,
             base_price_amount=product.base_price_amount,
             base_price_currency=product.base_price_currency,
-                        attributes=attributes or {},
+            attributes=attributes or {},
             urls=urls_list,
             created_at=product.created_at,
             updated_at=product.updated_at,

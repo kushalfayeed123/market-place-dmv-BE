@@ -74,6 +74,10 @@ class User(BaseModel):
         server_default=text("'en'"),
     )
 
+    # Password reset token (hash stored, raw token sent via email)
+    password_reset_token_hash = Column(Text, nullable=True)
+    password_reset_expires_at = Column(DateTime(timezone=True), nullable=True)
+
     # Indexes for performance
     __table_args__ = (
         Index('idx_users_email', email),

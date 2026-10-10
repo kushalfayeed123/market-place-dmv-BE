@@ -15,6 +15,7 @@ from app.schemas.auth import (
     MFASetup,
     MFAVerify,
     PasswordChange,
+    PasswordResetConfirm,
     PasswordResetRequest,
     RefreshTokenRequest,
     TokenResponse,
@@ -95,7 +96,6 @@ async def logout(
     return await service.logout(str(current_user.id))
 
 
-@router.post("/refresh", response_model=TokenResponse)
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     request: Request,
@@ -188,6 +188,30 @@ async def request_password_reset(
     Rate limited and requires idempotency key.
     """
     response_data = await service.request_password_reset(reset_data)
+
+    await finalize_idempotency(
+        request, None, status_code=status.HTTP_200_OK, response_body=response_data
+    )
+    return response_data
+
+
+@router.post("/password-reset/confirm")
+async def confirm_password_reset(
+    request: Request,
+    confirm_data: PasswordResetConfirm,
+    service: AuthService = get_auth_service_depends,
+    idempotency: dict = get_idempotency_depends,
+):
+    """
+    Confirm a password reset using a reset token.
+    Rate limited and requires idempotency key.
+    """
+    try:
+        response_data = await service.confirm_password_reset(confirm_data)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        )
 
     await finalize_idempotency(
         request, None, status_code=status.HTTP_200_OK, response_body=response_data

@@ -28,6 +28,7 @@ from app.schemas.auth import (
     MFASetup,
     MFAVerify,
     PasswordChange,
+    PasswordResetConfirm,
     PasswordResetRequest,
     RefreshTokenRequest,
     TokenResponse,
@@ -295,10 +296,54 @@ class AuthServiceImpl(AuthService):
         user = result.scalar_one_or_none()
 
         if user:
-            # Generate reset token (in practice, this would be stored and emailed)
-            secrets.token_urlsafe(32)
+            reset_token = secrets.token_urlsafe(32)
+            user.password_reset_token_hash = hash_refresh_token(reset_token)
+            user.password_reset_expires_at = datetime.now(timezone.utc) + timedelta(
+                minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
+            )
+            await self._db.commit()
 
         return {"message": "If the email exists, a reset link has been sent"}
+
+    async def confirm_password_reset(self, confirm_data: PasswordResetConfirm) -> dict:
+        """
+        Confirm a password reset using a reset token.
+
+        Args:
+            confirm_data: The password reset confirmation data (token + new password).
+
+        Returns:
+            Dictionary with response message.
+
+        Raises:
+            ValueError: If the token is invalid or expired.
+        """
+        # Find user whose reset token hash matches the provided token
+        result = await self._db.execute(
+            select(User).where(User.password_reset_token_hash.isnot(None))
+        )
+        users = result.scalars().all()
+        user = None
+        for u in users:
+            if u.password_reset_token_hash and verify_refresh_token(
+                confirm_data.token, u.password_reset_token_hash
+            ):
+                user = u
+                break
+
+        if not user:
+            raise ValueError("Invalid or expired reset token")
+
+        if user.password_reset_expires_at is None or user.password_reset_expires_at < datetime.now(timezone.utc):
+            raise ValueError("Reset token has expired")
+
+        user.password_hash = get_password_hash(confirm_data.new_password)
+        user.password_reset_token_hash = None
+        user.password_reset_expires_at = None
+        await self._db.commit()
+        await self._db.refresh(user)
+
+        return {"message": "Password has been reset successfully"}
 
     async def get_user(self, user_id: str) -> UserResponse | None:
         """
