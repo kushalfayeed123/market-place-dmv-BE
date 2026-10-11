@@ -4,11 +4,12 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "marketplace-backend"
+name = "markto-backend"
 version = "0.1.0"
-description = "Backend API for the Marketplace Platform"
+requires-python = ">=3.12"
+description = "Backend API for the Markto Platform"
 authors = [
-    {name = "Marketplace Team", email = "team@marketplace.example"}
+    {name = "Markto Team", email = "team@markto.example"}
 ]
 dependencies = [
     "fastapi>=0.104.0",
@@ -25,7 +26,7 @@ dependencies = [
     "redis>=5.0.0",
     "python-dotenv>=1.0.0",
     "pyotp>=2.9.0",
-    "pythonjsonlogger>=2.0.0",
+    "python-json-logger>=2.0.0",
 ]
 
 # Explicitly specify packages to avoid setuptools discovery issues
@@ -45,7 +46,7 @@ dev = [
 ]
 
 [project.scripts]
-marketplace-backend = "app.main:app"
+markto-backend = "app.main:app"
 
 [tool.black]
 line-length = 88
