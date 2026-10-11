@@ -25,6 +25,7 @@ dependencies = [
     "redis>=5.0.0",
     "python-dotenv>=1.0.0",
     "pyotp>=2.9.0",
+    "pythonjsonlogger>=2.0.0",
 ]
 
 # Explicitly specify packages to avoid setuptools discovery issues
