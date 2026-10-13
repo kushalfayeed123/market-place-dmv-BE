@@ -20,9 +20,9 @@ from app.modules.commissions.router import router as commissions_router
 from app.modules.fulfillment.router import router as fulfillment_router
 from app.modules.knowledge.router import router as knowledge_router
 from app.modules.ledger.router import router as ledger_router
-from app.modules.merchants.router import router as merchants_router
-from app.modules.merchant_console.router import router as merchant_console_router
 from app.modules.merchant_console.agent_router import router as agent_router
+from app.modules.merchant_console.router import router as merchant_console_router
+from app.modules.merchants.router import router as merchants_router
 from app.modules.notifications.router import router as notifications_router
 from app.modules.orders.router import router as orders_router
 from app.modules.payments.router import router as payments_router
