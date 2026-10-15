@@ -44,6 +44,7 @@ from app.models.dispute import Dispute
 from app.models.fulfillment import Fulfillment
 from app.models.inventory import Inventory
 from app.models.merchant import Merchant
+from app.models.merchant_payout_account import MerchantPayoutAccount
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.payout import Payout
@@ -57,6 +58,7 @@ from app.schemas.merchant_console import (
     MerchantOrderListItem,
     MerchantProductListItem,
     MerchantShipmentListItem,
+    PayoutAccountStatusResponse,
     PayoutListItem,
 )
 from app.schemas.merchants import KycReviewRequest, PayoutCreate, PayoutResponse
@@ -168,7 +170,47 @@ async def get_merchant_attention(
         orders_to_fulfil=orders_to_fulfil or 0,
         disputes_due=disputes_due or 0,
         unread_messages=unread_messages or 0,
-                low_stock=(low_stock or 0) + (low_stock_by_inv or 0),
+        low_stock=(low_stock or 0) + (low_stock_by_inv or 0),
+    )
+
+
+@router.get(
+    "/merchants/{merchant_id}/payout-account-status",
+    response_model=PayoutAccountStatusResponse,
+)
+async def get_payout_account_status(
+    merchant_id: str,
+    current_user: User = get_current_active_user_depends,
+    db: AsyncSession = get_db_depends,
+):
+    """Check whether a merchant has an active payout (settlement) account.
+
+    The frontend dashboard calls this on login to decide whether to show
+    the payout-setup prompt before displaying the normal merchant view.
+    """
+    merchant = await _require_merchant_access(merchant_id, current_user, db)
+    result = await db.execute(
+        select(MerchantPayoutAccount)
+        .where(
+            MerchantPayoutAccount.merchant_id == merchant.id,
+            MerchantPayoutAccount.is_active.is_(True),
+        )
+        .order_by(MerchantPayoutAccount.created_at.desc())
+        .limit(1)
+    )
+    account = result.scalar_one_or_none()
+    if account:
+        return PayoutAccountStatusResponse(
+            merchant_id=str(account.merchant_id),
+            has_payout_account=True,
+            provider=account.provider,
+            currency=account.currency,
+            is_active=account.is_active,
+            created_at=account.created_at,
+        )
+    return PayoutAccountStatusResponse(
+        merchant_id=merchant_id,
+        has_payout_account=False,
     )
 
 

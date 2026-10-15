@@ -113,3 +113,19 @@ class AgentChatResponse(BaseModel):
 class AgentConfirmResponse(BaseModel):
     ok: bool
     result_summary: str
+
+
+# ── Payout account status ──────────────────────────────────────────────────
+
+class PayoutAccountStatusResponse(BaseModel):
+    """Whether a merchant has at least one active payout (settlement) account.
+
+    Returned by ``GET /merchants/{id}/payout-account-status`` so the merchant
+    dashboard can decide whether to show a setup prompt on login.
+    """
+    merchant_id: str
+    has_payout_account: bool
+    provider: Optional[str] = None
+    currency: Optional[str] = None
+    is_active: bool = False
+    created_at: Optional[datetime] = None

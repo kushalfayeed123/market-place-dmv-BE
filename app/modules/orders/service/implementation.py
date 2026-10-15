@@ -164,6 +164,8 @@ class OrderServiceImpl(OrderService):
             idempotency_key=new_order.idempotency_key,
             item_count=sum(item_data["quantity"] for item_data in order_items_data),
             created_at=new_order.created_at,
+            delivery_address=checkout_data.delivery_address,
+            fulfillment_option=checkout_data.fulfillment_option,
             items=[
                 {
                     "id": str(item_data.get("variant_id", "")),

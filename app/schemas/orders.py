@@ -19,7 +19,16 @@ class Cart(BaseModel):
 
 class CheckoutRequest(BaseModel):
     items: list[CartItem]
-    # In a real implementation, we would also include shipping info, payment method, etc.
+    # Delivery address — required for delivery fulfillment, optional for pickup
+    delivery_address: dict | None = Field(
+        None,
+        description="Delivery address as a JSON object. Required when fulfillment_option is 'delivery'",
+    )
+    # Fulfillment option: "delivery" or "pickup"
+    fulfillment_option: str | None = Field(
+        None,
+        description="How the order should be fulfilled: 'delivery' or 'pickup'",
+    )
 
 
 class CheckoutResponse(BaseModel):
@@ -32,6 +41,8 @@ class CheckoutResponse(BaseModel):
     item_count: int = 0
     created_at: datetime
     items: list[dict]  # Order item details
+    delivery_address: dict | None = None
+    fulfillment_option: str | None = None
 
 
 class OrderResponse(BaseModel):

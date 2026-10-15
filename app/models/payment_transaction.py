@@ -21,6 +21,7 @@ class PaymentTransaction(BaseModel):
     amount = Column(BIGINT, nullable=False)  # Minor units
     currency = Column(CHAR(3), nullable=False)
     raw_payload = Column(Text, nullable=True)  # JSONB equivalent
+    payment_url = Column(Text, nullable=True)  # Provider auth/redirect URL
     
     # Indexes and constraints
     __table_args__ = (

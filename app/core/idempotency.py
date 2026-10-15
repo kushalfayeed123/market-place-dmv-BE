@@ -6,17 +6,16 @@ Provides dependency and middleware for ensuring idempotent operations.
 
 import hashlib
 import json
-from typing import Optional, Callable
-from fastapi import Request, HTTPException, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func
 import logging
 
-from app.db.session import get_db
+from app.db.session import AsyncSessionLocal, get_db
 from app.models.idempotency_key import IdempotencyKey
-from app.core.config import settings
+from fastapi import Depends, HTTPException, Request
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+_DB_DEPENDENCY = Depends(get_db)
 
 def hash_request_body(body: bytes) -> str:
     """Create a hash of the request body for idempotency checking."""
@@ -24,7 +23,7 @@ def hash_request_body(body: bytes) -> str:
 
 async def get_idempotency_dependency(
     request: Request,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = _DB_DEPENDENCY
 ):
     """
     Dependency that handles idempotency key validation and storage.
@@ -93,7 +92,7 @@ async def get_idempotency_dependency(
         # Return cached response
         request.state.cached_response = {
             "status_code": idempotency_record.response_status,
-            "body": idempotency_record.response_body
+            "body": json.loads(idempotency_record.response_body) if idempotency_record.response_body else {}
         }
         request.state.skip_execution = True
         return idempotency_record
@@ -118,37 +117,61 @@ async def get_idempotency_dependency(
 
 async def finalize_idempotency(
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = None,
     status_code: int = 200,
-    response_body: dict = None
+    response_body: dict | None = None,
 ):
     """
     Call this at the end of a successful request to store the response
     and mark the idempotency key as completed.
+
+    If ``db`` is ``None`` (the common case, since the idempotency dependency
+    already closed its own session), a fresh session is opened so the
+    record created by ``get_idempotency_dependency`` can be re-queried and
+    updated.
     """
     if hasattr(request.state, 'skip_execution') and request.state.skip_execution:
         # Return cached response
         cached = getattr(request.state, 'cached_response', None)
         if cached:
             return cached["status_code"], cached["body"]
-    
+
     if not hasattr(request.state, 'idempotency_record'):
         # No idempotency tracking needed
         return status_code, response_body or {}
-    
-    # Update the idempotency record with response
-    idempotency_record = request.state.idempotency_record
-    idempotency_record.status = "completed"
-    idempotency_record.response_status = status_code
-    idempotency_record.response_body = response_body or {}
-    idempotency_record.completed_at = func.now()
-    
-    await db.commit()
-    
+
+    # Use the provided db session if available, otherwise open a fresh one
+    idempotency_key = getattr(request.state, "idempotency_key", None)
+    if idempotency_key:
+        if db is not None:
+            # Use the injected session
+            result = await db.execute(
+                select(IdempotencyKey).where(IdempotencyKey.idempotency_key == idempotency_key)
+            )
+            record = result.scalar_one_or_none()
+            if record:
+                record.status = "completed"
+                record.response_status = status_code
+                record.response_body = json.dumps(response_body or {}, default=str)
+                record.completed_at = func.now()
+                await db.commit()
+        else:
+            # Open a fresh session and re-query the record by key
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(IdempotencyKey).where(IdempotencyKey.idempotency_key == idempotency_key)
+                )
+                record = result.scalar_one_or_none()
+                if record:
+                    record.status = "completed"
+                    record.response_status = status_code
+                    record.response_body = json.dumps(response_body or {}, default=str)
+                    record.completed_at = func.now()
+                    await session.commit()
+
     return status_code, response_body or {}
 
 def setup_idempotency(app):
     """Setup idempotency handling on the FastAPI app."""
     # This would typically involve adding middleware or dependencies
     # For now, we'll rely on explicit dependency usage in endpoints
-    pass

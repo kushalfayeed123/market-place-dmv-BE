@@ -56,6 +56,23 @@ class PaymentService(ABC):
         ...
 
     @abstractmethod
+    async def get_payment_by_order(self, order_id: str, user_id: str) -> PaymentResponse | None:
+        """
+        Get the most recent payment for an order.
+
+        Args:
+            order_id: The order ID.
+            user_id: The buyer's user ID for access control.
+
+        Returns:
+            The payment response if found, None otherwise.
+
+        Raises:
+            ValueError: If the order exists but the user is not authorized.
+        """
+        ...
+
+    @abstractmethod
     async def list_payments(
         self,
         skip: int = 0,

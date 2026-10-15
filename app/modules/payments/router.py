@@ -8,13 +8,17 @@ Communicates with the service layer via the PaymentService abstraction.
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
-from app.core.security import get_current_active_user
+from app.core.security import get_current_active_user, to_uuid
+from app.db.session import get_db, AsyncSession
+from app.models.order import Order
 from app.modules.merchants.service.base import MerchantService
 from app.modules.merchants.service.dependency import get_merchant_service
 from app.modules.payments.service.base import PaymentService
 from app.modules.payments.service.dependency import get_payment_service
+from sqlalchemy import select
 from app.schemas.payments import (
     PaymentProcess,
+    PaymentProviderInfo,
     PaymentResponse,
     RefundRequest,
     RefundResponse,
@@ -31,12 +35,13 @@ get_payment_service_depends = Depends(get_payment_service)
 get_merchant_service_depends = Depends(get_merchant_service)
 
 
-@router.post("/process", response_model=PaymentResponse)
+@router.post("/process", status_code=status.HTTP_201_CREATED, response_model=PaymentResponse)
 async def process_payment(
     request: Request,
     payment_data: PaymentProcess,
     current_user: dict = get_current_active_user_depends,
     service: PaymentService = get_payment_service_depends,
+    db: AsyncSession = Depends(get_db),
     idempotency: dict = get_idempotency_depends,
 ):
     """
@@ -70,7 +75,7 @@ async def process_payment(
         )
 
     await finalize_idempotency(
-        request, None, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
+        request, db, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
     )
     return response_data
 
@@ -149,6 +154,70 @@ async def get_payment(
             )
 
     return payment
+@router.get("/order/{order_id}", response_model=PaymentResponse)
+async def get_payment_by_order(
+    order_id: str,
+    current_user: dict = get_current_active_user_depends,
+    service: PaymentService = get_payment_service_depends,
+):
+    """Get the most recent payment for an order.
+    Requires authentication — buyers can only see their own order's payments,
+    merchants/admins can see payments for their orders.
+    """
+    try:
+        payment = await service.get_payment_by_order(order_id, str(current_user.id))
+    except ValueError as e:
+        error_msg = str(e)
+        if "not found" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=error_msg
+            )
+        if "not authorized" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=error_msg
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg
+        )
+
+    if not payment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No payment found for this order",
+        )
+
+    return payment
+
+
+@router.get("/methods", response_model=list[PaymentProviderInfo])
+async def list_payment_methods(
+    current_user: dict = get_current_active_user_depends,
+    merchant_id: str | None = Query(None, description="Merchant ID to filter currency"),
+    currency: str | None = Query(None, description="ISO 4217 currency to filter providers"),
+):
+    """List available payment providers.
+
+    Returns all registered providers.  Providers that are declared but
+    not yet implemented (e.g. Flutterwave, Stripe) are included with
+    ``implemented=false`` and a ``disabled_reason`` so the frontend can
+    render them as disabled buttons.
+
+    The ``currency`` query parameter filters the list to providers that
+    support a given currency.
+    """
+    from app.modules.payments.providers.registry import get_available_providers
+
+    providers = get_available_providers(currency)
+    return [
+        PaymentProviderInfo(
+            key=p.key,
+            name=p.name,
+            implemented=p.implemented,
+            supported_currencies=p.supported_currencies,
+            disabled_reason=None if p.implemented else "Provider not yet integrated",
+        )
+        for p in providers
+    ]
 
 
 @router.post("/{payment_id}/refund", response_model=RefundResponse)
@@ -194,7 +263,7 @@ async def process_refund(
         )
 
     await finalize_idempotency(
-        request, None, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
+        request, db, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
     )
     return response_data
 

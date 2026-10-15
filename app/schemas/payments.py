@@ -23,6 +23,16 @@ class PaymentResponse(BaseModel):
     amount: int  # Minor units
     currency: str
     created_at: datetime
+    payment_url: str | None = Field(
+        None,
+        description="URL the buyer must visit to complete the payment. "
+        "May be None for non-redirect providers or after completion.",
+    )
+    payment_method: str | None = Field(
+        None,
+        description="Payment method type, e.g. 'card', 'bank_transfer', 'mobile_money'. "
+        "Null when not applicable.",
+    )
 
 
 class RefundRequest(BaseModel):
@@ -59,3 +69,25 @@ class WebhookPayload(BaseModel):
     data: dict = {}
     
     model_config = {"extra": "allow"}
+
+
+class PaymentProviderInfo(BaseModel):
+    """Information about a payment provider's availability.
+
+    Returned by ``GET /payments/methods`` so the frontend can render
+    provider buttons — enabled ones become clickable, disabled ones
+    are greyed out with a "Coming soon" label.
+    """
+    key: str
+    name: str
+    implemented: bool = Field(
+        ..., description="Whether the provider is currently integrated"
+    )
+    supported_currencies: list[str] = Field(
+        default_factory=list,
+        description="ISO 4217 currency codes this provider supports",
+    )
+    disabled_reason: str | None = Field(
+        None,
+        description="Why the provider is disabled, if applicable",
+    )

@@ -10,6 +10,10 @@ from app.core.security import to_uuid
 from app.models.order import Order
 from app.models.payment_transaction import PaymentTransaction
 from app.models.webhook_event import WebhookEvent
+from app.modules.payments.providers.registry import (
+    is_provider_implemented,
+    get_provider,
+)
 from app.modules.payments.service.base import PaymentService
 from app.schemas.payments import (
     PaymentProcess,
@@ -68,21 +72,38 @@ class PaymentServiceImpl(PaymentService):
         if order.buyer_id != to_uuid(user_id):
             raise ValueError("Not authorized to pay for this order")
 
-        # Process payment with provider
-        # In production, this would call the actual payment provider (Paystack, etc.)
-        # and return the provider's authorization URL/reference.
-        # For now, we create an "initialized" payment that the webhook will confirm.
-        provider_reference = f"{payment_data.provider}_{uuid.uuid4()}"
+        # Verify the payment provider is implemented and available
+        provider_key = payment_data.provider
+        if not is_provider_implemented(provider_key):
+            raise ValueError(
+                f"Payment provider '{provider_key}' is not yet implemented. "
+                f"Available providers: paystack"
+            )
+        provider = get_provider(provider_key)
+        if provider is None:
+            raise ValueError(f"Unknown payment provider '{provider_key}'")
 
-        # Create payment transaction with "initialized" status
+        # Initialise the payment with the provider.
+        # When Paystack credentials are not configured (dev/test), the provider
+        # falls back to a local stub that returns a reference + mock URL.
+        init_result = await provider.initialize_transaction(
+            order_id=str(order.id),
+            amount=order.total_amount,
+            currency=order.currency,
+            buyer_email=None,
+            metadata={"order_number": order.order_number},
+        )
+
+        # Create payment transaction with the provider's reference
         # The webhook (not this endpoint) will update it to "success"
         payment_transaction = PaymentTransaction(
             order_id=order.id,
             provider=payment_data.provider,
-            provider_reference=provider_reference,
-            status="initialized",
+            provider_reference=init_result.provider_reference,
+            status=init_result.status,
             amount=order.total_amount,
             currency=order.currency,
+            payment_url=init_result.payment_url,
         )
 
         self._db.add(payment_transaction)
@@ -100,6 +121,8 @@ class PaymentServiceImpl(PaymentService):
             amount=payment_transaction.amount,
             currency=payment_transaction.currency,
             created_at=payment_transaction.created_at,
+            payment_url=init_result.payment_url,
+            payment_method=None,
         )
 
     async def get_payment(self, payment_id: str) -> PaymentResponse | None:
@@ -129,6 +152,59 @@ class PaymentServiceImpl(PaymentService):
             amount=payment.amount,
             currency=payment.currency,
             created_at=payment.created_at,
+            payment_url=payment.payment_url,
+            payment_method=None,
+        )
+
+    async def get_payment_by_order(self, order_id: str, user_id: str) -> PaymentResponse | None:
+        """
+        Get the most recent payment for an order, verifying the buyer owns it.
+
+        Args:
+            order_id: The order ID.
+            user_id: The buyer's user ID for access control.
+
+        Returns:
+            The payment response if found, None otherwise.
+
+        Raises:
+            ValueError: If the order exists but the user is not the buyer.
+        """
+        # Verify the order exists and the user owns it
+        result = await self._db.execute(
+            select(Order).where(Order.id == to_uuid(order_id))
+        )
+        order = result.scalar_one_or_none()
+
+        if not order:
+            raise ValueError("Order not found")
+
+        if order.buyer_id != to_uuid(user_id):
+            raise ValueError("Not authorized to view payments for this order")
+
+        # Get the most recent payment for this order
+        result = await self._db.execute(
+            select(PaymentTransaction)
+            .where(PaymentTransaction.order_id == to_uuid(order_id))
+            .order_by(PaymentTransaction.created_at.desc())
+            .limit(1)
+        )
+        payment = result.scalar_one_or_none()
+
+        if payment is None:
+            return None
+
+        return PaymentResponse(
+            id=str(payment.id),
+            order_id=str(payment.order_id),
+            provider=payment.provider,
+            provider_reference=payment.provider_reference,
+            status=payment.status,
+            amount=payment.amount,
+            currency=payment.currency,
+            created_at=payment.created_at,
+            payment_url=payment.payment_url,
+            payment_method=None,
         )
 
     async def list_payments(
@@ -182,6 +258,8 @@ class PaymentServiceImpl(PaymentService):
                 amount=payment.amount,
                 currency=payment.currency,
                 created_at=payment.created_at,
+                payment_url=payment.payment_url,
+                payment_method=None,
             )
             for payment in payments
         ]
@@ -277,7 +355,7 @@ class PaymentServiceImpl(PaymentService):
                 event_id=event_id,
             )
 
-        # Store webhook event
+                # Store webhook event
         webhook_event = WebhookEvent(
             provider=provider,
             event_id=event_id,
@@ -286,6 +364,36 @@ class PaymentServiceImpl(PaymentService):
         )
 
         self._db.add(webhook_event)
+
+        # If this is a payment success webhook, update the payment status
+        # and the order status so the buyer's PaymentCapturePanel refreshes.
+        success_events = {"charge.success", "payment.success", "payment.succeeded"}
+        if event_type in success_events:
+            import json as _json
+            try:
+                payload_dict = _json.loads(payload) if isinstance(payload, (str, bytes)) else payload
+                ref = None
+                if isinstance(payload_dict, dict):
+                    ref = payload_dict.get("reference") or (
+                        payload_dict.get("data", {}) or {}
+                    ).get("reference")
+                if ref:
+                    existing = await self._db.execute(
+                        select(PaymentTransaction).where(
+                            PaymentTransaction.provider == provider,
+                            PaymentTransaction.provider_reference == ref,
+                        )
+                    )
+                    pt = existing.scalar_one_or_none()
+                    if pt and pt.status != "success":
+                        pt.status = "success"
+                        # Mark the order as paid
+                        o = await self._db.get(Order, pt.order_id)
+                        if o and o.status == "pending":
+                            o.status = "paid"
+                        await self._db.refresh(pt)
+            except (ValueError, TypeError):
+                pass
         await self._db.commit()
 
         return WebhookResponse(

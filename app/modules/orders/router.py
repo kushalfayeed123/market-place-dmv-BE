@@ -8,6 +8,7 @@ Communicates with the service layer via the OrderService abstraction.
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
 from app.core.rate_limit import sliding_window_allow
 from app.core.security import get_current_active_user
+from app.db.session import get_db, AsyncSession
 from app.modules.merchants.service.base import MerchantService
 from app.modules.merchants.service.dependency import get_merchant_service
 from app.modules.notifications.service.base import NotificationService
@@ -35,13 +36,14 @@ get_merchant_service_depends = Depends(get_merchant_service)
 get_notification_service_depends = Depends(get_notification_service)
 
 
-@router.post("/checkout", response_model=CheckoutResponse)
+@router.post("/checkout", status_code=status.HTTP_201_CREATED, response_model=CheckoutResponse)
 async def checkout(
     request: Request,
     checkout_data: CheckoutRequest,
     current_user: dict = get_current_active_user_depends,
     service: OrderService = get_order_service_depends,
     notification_service: NotificationService = get_notification_service_depends,
+    db: AsyncSession = Depends(get_db),
     idempotency: dict = get_idempotency_depends,
 ):
     """
@@ -113,7 +115,7 @@ async def checkout(
             )
 
     await finalize_idempotency(
-        request, None, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
+        request, db, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
     )
     return response_data
 
