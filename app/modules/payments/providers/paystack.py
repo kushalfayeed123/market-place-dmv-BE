@@ -133,10 +133,17 @@ class PaystackProvider(PaymentProvider):
         currency: str,
         metadata: dict | None,
     ) -> PaymentInitResult:
-        """Generate a deterministic stub payment when Paystack is not configured."""
+        """Generate a deterministic stub payment when Paystack is not configured.
+
+        The stub ``payment_url`` points at a local backend callback endpoint that
+        simulates a successful Paystack redirect + webhook round-trip, then
+        bounces the buyer back to the storefront.  This lets the full
+        checkout → pay → confirm flow work end-to-end without real API keys.
+        """
         reference = f"paystack_ord_{order_id}_{uuid.uuid4().hex[:12]}"
-        # A plausible authorization URL so the frontend can render a redirect button.
-        payment_url = f"https://paystack.co/pay/{reference}"
+        # Stub redirect: backend simulates the Paystack webhook, then redirects
+        # the buyer back to the frontend order page.
+        payment_url = f"{settings.FRONTEND_URL}/pay/stub-callback?ref={reference}"
         return PaymentInitResult(
             provider_reference=reference,
             payment_url=payment_url,

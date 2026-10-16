@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     SUPPORT_EMAIL_FROM: str = Field("", env="SUPPORT_EMAIL_FROM")
     SUPPORT_EMAIL_TO: str = Field("", env="SUPPORT_EMAIL_TO")             # comma-separated pickup mailbox(es)
 
+    # Frontend URL — used by the stub Paystack redirect to return buyers to the store
+    FRONTEND_URL: str = Field("http://localhost:3000", env="FRONTEND_URL")
+
     @property
     def is_development(self) -> bool:
         return self.ENVIRONMENT == "development"

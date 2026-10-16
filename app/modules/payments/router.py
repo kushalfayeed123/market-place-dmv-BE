@@ -114,46 +114,6 @@ async def list_payments(
     )
 
 
-@router.get("/{payment_id}", response_model=PaymentResponse)
-async def get_payment(
-    payment_id: str,
-    current_user: dict = get_current_active_user_depends,
-    service: PaymentService = get_payment_service_depends,
-):
-    """Get payment details by ID. Requires authentication."""
-    payment = await service.get_payment(payment_id)
-
-    if not payment:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payment not found",
-        )
-
-    # Authorization check: buyer can only see their own order's payment
-    # merchant/admin can see payments for their orders
-    from sqlalchemy import select
-
-    from app.core.security import to_uuid
-    from app.models.order import Order
-
-    order_result = await service._db.execute(
-        select(Order).where(Order.id == to_uuid(payment.order_id))
-    )
-    order = order_result.scalar_one_or_none()
-
-    if order:
-        user_role = current_user.role.value
-        user_id = str(current_user.id)
-        is_owner = order.buyer_id == to_uuid(user_id)
-        is_merchant = user_role in ["merchant_owner", "merchant_staff", "platform_admin"]
-
-        if not is_owner and not is_merchant:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not authorized to view this payment",
-            )
-
-    return payment
 @router.get("/order/{order_id}", response_model=PaymentResponse)
 async def get_payment_by_order(
     order_id: str,
@@ -296,6 +256,65 @@ async def handle_webhook(
     body = await request.body()
     
     return await service.handle_webhook(provider, event_type, event_id, body)
+
+
+@router.post("/stub/simulate", response_model=WebhookResponse)
+async def simulate_payment_callback(
+    ref: str = Query(..., description="Provider reference from the stub redirect URL"),
+    service: PaymentService = get_payment_service_depends,
+):
+    """Simulate a successful Paystack callback (dev/test only).
+
+    When the Paystack provider runs in stub mode the ``payment_url`` points to a
+    frontend callback page that calls this endpoint.  This fires a simulated
+    ``charge.success`` webhook so the full checkout → pay → confirm cycle works
+    end-to-end without real API keys.
+    """
+    import json as _json
+    payload = _json.dumps({
+        "event": "charge.success",
+        "data": {"id": f"stub_evt_{ref}", "reference": ref},
+    }).encode("utf-8")
+    return await service.handle_webhook("paystack", "charge.success", f"stub_evt_{ref}", payload)
+
+
+# ── Dynamic /{payment_id} routes go LAST so they don't shadow static paths ────
+
+@router.get("/{payment_id}", response_model=PaymentResponse)
+async def get_payment(
+    payment_id: str,
+    current_user: dict = get_current_active_user_depends,
+    service: PaymentService = get_payment_service_depends,
+):
+    """Get payment details by ID. Requires authentication."""
+    payment = await service.get_payment(payment_id)
+
+    if not payment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Payment not found",
+        )
+
+    # Authorization check: buyer can only see their own order's payment
+    # merchant/admin can see payments for their orders
+    order_result = await service._db.execute(
+        select(Order).where(Order.id == to_uuid(payment.order_id))
+    )
+    order = order_result.scalar_one_or_none()
+
+    if order:
+        user_role = current_user.role.value
+        user_id = str(current_user.id)
+        is_owner = order.buyer_id == to_uuid(user_id)
+        is_merchant = user_role in ["merchant_owner", "merchant_staff", "platform_admin"]
+
+        if not is_owner and not is_merchant:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to view this payment",
+            )
+
+    return payment
 
 
 # Include the router in the main app

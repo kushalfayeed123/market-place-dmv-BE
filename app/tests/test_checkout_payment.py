@@ -262,3 +262,79 @@ async def test_get_payment_by_order_access_control(
         headers=other_headers,
     )
     assert pay_resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_stub_simulate_completes_payment_end_to_end(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict
+):
+    """End-to-end: checkout → process_payment → stub simulate → success.
+
+    Exercises the full stub fallback flow that a dev/test user experiences
+    when no real Paystack credentials are configured.
+    """
+    variant_id = seed_data["variant_id"]
+
+    # 1. Checkout
+    checkout_resp = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": variant_id, "quantity": 1}]},
+        headers={**buyer_headers, "Idempotency-Key": "e2e-stub-checkout-1"},
+    )
+    assert checkout_resp.status_code == 201
+    order_id = checkout_resp.json()["id"]
+
+    # 2. Process payment (stub → gets a payment_url + provider_reference)
+    pay_resp = await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": order_id, "provider": "paystack"},
+        headers={**buyer_headers, "Idempotency-Key": "e2e-stub-pay-1"},
+    )
+    assert pay_resp.status_code == 201
+    payment = pay_resp.json()
+    ref = payment["provider_reference"]
+    assert payment["status"] == "initialized"
+    assert payment.get("payment_url") is not None
+    assert payment["payment_url"].startswith("http://localhost:3000/pay/stub-callback")
+
+    # 3. Simulate the Paystack callback via the stub endpoint
+    stub_resp = await client.post(
+        f"/api/v1/payments/stub/simulate?ref={ref}",
+    )
+    assert stub_resp.status_code == 200
+
+    # 4. Payment should now be 'success'
+    pay_get = await client.get(
+        f"/api/v1/payments/order/{order_id}",
+        headers=buyer_headers,
+    )
+    assert pay_get.status_code == 200
+    updated = pay_get.json()
+    assert updated["status"] == "success"
+
+    # 5. Order should be 'paid'
+    order_resp = await client.get(
+        f"/api/v1/orders/{order_id}",
+        headers=buyer_headers,
+    )
+    assert order_resp.status_code == 200
+    order = order_resp.json()
+    assert order["status"] == "paid"
+
+
+@pytest.mark.asyncio
+async def test_get_payment_methods_lists_providers(
+    client: AsyncClient, buyer_headers: dict
+):
+    """GET /payments/methods should list registered providers with implemented flag."""
+    resp = await client.get("/api/v1/payments/methods", headers=buyer_headers)
+    assert resp.status_code == 200
+    methods = resp.json()
+    keys = {m["key"] for m in methods}
+    assert "paystack" in keys
+    assert "flutterwave" in keys
+    assert "stripe" in keys
+    paystack = next(m for m in methods if m["key"] == "paystack")
+    assert paystack["implemented"] is True
+    flutterwave = next(m for m in methods if m["key"] == "flutterwave")
+    assert flutterwave["implemented"] is False
