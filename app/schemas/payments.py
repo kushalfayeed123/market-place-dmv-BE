@@ -10,7 +10,10 @@ from pydantic import BaseModel, Field
 
 class PaymentProcess(BaseModel):
     order_id: str
-    provider: str = Field(default="paystack", pattern="^(paystack|flutterwave|stripe)$")
+    provider: str = Field(
+        default="paystack",
+        pattern="^(paystack|flutterwave|stripe|pay_on_delivery)$",
+    )
     # In a real implementation, we would include payment method details, customer info, etc.
 
 

@@ -7,7 +7,9 @@ Handles database operations for payments using SQLAlchemy.
 import uuid
 
 from app.core.security import to_uuid
-from app.models.order import Order
+from app.models.ledger_entry import LedgerDirection, LedgerEntry, LedgerEntryType
+from app.models.order import Order, OrderStatus
+from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
 from app.models.webhook_event import WebhookEvent
 from app.modules.payments.providers.registry import (
@@ -72,8 +74,56 @@ class PaymentServiceImpl(PaymentService):
         if order.buyer_id != to_uuid(user_id):
             raise ValueError("Not authorized to pay for this order")
 
-        # Verify the payment provider is implemented and available
         provider_key = payment_data.provider
+
+        # ── Pay on Delivery (merchant-confirmed) ──────────────────────────
+        # No online provider is involved.  The order is placed into
+        # awaiting_approval so the merchant can confirm payment once the
+        # goods are delivered.  A payout-hold ledger entry is created per
+        # merchant line item and released when the merchant approves.
+        if provider_key == "pay_on_delivery":
+            if order.status in (
+                OrderStatus.PAID.value,
+                OrderStatus.AWAITING_APPROVAL.value,
+            ):
+                raise ValueError(
+                    f"Order cannot use Pay on Delivery in status '{order.status}'"
+                )
+
+            payment_transaction = PaymentTransaction(
+                order_id=order.id,
+                provider="pay_on_delivery",
+                provider_reference=f"pod_{order.order_number}",
+                status="pending_verification",
+                amount=order.total_amount,
+                currency=order.currency,
+                payment_url=None,
+            )
+            self._db.add(payment_transaction)
+
+            # Payout-hold entries per merchant line item (released on approval).
+            await _create_payout_hold_entries(
+                self._db, order, payment_transaction, user_id
+            )
+
+            order.status = OrderStatus.AWAITING_APPROVAL.value
+            await self._db.commit()
+            await self._db.refresh(payment_transaction)
+
+            return PaymentResponse(
+                id=str(payment_transaction.id),
+                order_id=str(payment_transaction.order_id),
+                provider=payment_transaction.provider,
+                provider_reference=payment_transaction.provider_reference,
+                status=payment_transaction.status,
+                amount=payment_transaction.amount,
+                currency=payment_transaction.currency,
+                created_at=payment_transaction.created_at,
+                payment_url=None,
+                payment_method="pay_on_delivery",
+            )
+
+        # Verify the payment provider is implemented and available
         if not is_provider_implemented(provider_key):
             raise ValueError(
                 f"Payment provider '{provider_key}' is not yet implemented. "
@@ -153,7 +203,7 @@ class PaymentServiceImpl(PaymentService):
             currency=payment.currency,
             created_at=payment.created_at,
             payment_url=payment.payment_url,
-            payment_method=None,
+            payment_method="pay_on_delivery" if payment.provider == "pay_on_delivery" else None,
         )
 
     async def get_payment_by_order(self, order_id: str, user_id: str) -> PaymentResponse | None:
@@ -204,7 +254,7 @@ class PaymentServiceImpl(PaymentService):
             currency=payment.currency,
             created_at=payment.created_at,
             payment_url=payment.payment_url,
-            payment_method=None,
+            payment_method="pay_on_delivery" if payment.provider == "pay_on_delivery" else None,
         )
 
     async def list_payments(
@@ -259,7 +309,7 @@ class PaymentServiceImpl(PaymentService):
                 currency=payment.currency,
                 created_at=payment.created_at,
                 payment_url=payment.payment_url,
-                payment_method=None,
+                payment_method="pay_on_delivery" if payment.provider == "pay_on_delivery" else None,
             )
             for payment in payments
         ]
@@ -400,4 +450,50 @@ class PaymentServiceImpl(PaymentService):
             status="success",
             message="Webhook received and stored",
             event_id=event_id,
+        )
+
+
+async def _create_payout_hold_entries(db, order, payment_transaction, created_by: str) -> None:
+    """Create payout-hold ledger entries per merchant line item.
+
+    Mirrors the ledger entries in ``submit_proof_of_payment`` so that
+    ``approve_order``'s payout-release balances against them.  Funds stay
+    held until the merchant confirms pay-on-delivery payment.
+    """
+    group_id = uuid.uuid4()
+    items_result = db.execute(
+        select(OrderItem).where(OrderItem.order_id == order.id)
+    )
+    order_items = items_result.scalars().all()
+
+    for item in order_items:
+        # Sale entry (debit — platform records the sale)
+        db.add(
+            LedgerEntry(
+                entry_group_id=group_id,
+                account_type="platform_revenue",
+                merchant_id=item.merchant_id,
+                direction=LedgerDirection.DEBIT.value,
+                entry_type=LedgerEntryType.SALE.value,
+                amount=abs(item.line_total),
+                currency=item.currency,
+                order_id=order.id,
+                payment_transaction_id=payment_transaction.id,
+                created_by=str(created_by),
+            )
+        )
+        # Payout hold entry (credit — funds held for merchant until approval)
+        db.add(
+            LedgerEntry(
+                entry_group_id=group_id,
+                account_type="merchant_wallet",
+                merchant_id=item.merchant_id,
+                direction=LedgerDirection.CREDIT.value,
+                entry_type=LedgerEntryType.PAYOUT_HOLD.value,
+                amount=abs(item.line_total),
+                currency=item.currency,
+                order_id=order.id,
+                payment_transaction_id=payment_transaction.id,
+                created_by=str(created_by),
+            )
         )

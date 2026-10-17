@@ -6,16 +6,16 @@ Communicates with the service layer via the PaymentService abstraction.
 
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import select
 
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
 from app.core.security import get_current_active_user, to_uuid
-from app.db.session import get_db, AsyncSession
+from app.db.session import AsyncSession, get_db
 from app.models.order import Order
 from app.modules.merchants.service.base import MerchantService
 from app.modules.merchants.service.dependency import get_merchant_service
 from app.modules.payments.service.base import PaymentService
 from app.modules.payments.service.dependency import get_payment_service
-from sqlalchemy import select
 from app.schemas.payments import (
     PaymentProcess,
     PaymentProviderInfo,
@@ -168,6 +168,19 @@ async def list_payment_methods(
     from app.modules.payments.providers.registry import get_available_providers
 
     providers = get_available_providers(currency)
+
+    # Pay on Delivery is a merchant-confirmed payment method, not an online
+    # provider, so it is not in the provider registry.  It is always shown as
+    # an available (implemented) option for every currency.
+    providers = [
+        *providers,
+        PaymentProviderInfo(
+            key="pay_on_delivery",
+            name="Pay on Delivery",
+            implemented=True,
+            supported_currencies=["NGN", "USD", "GBP", "EUR", "KES", "ZAR"],
+        ),
+    ]
     return [
         PaymentProviderInfo(
             key=p.key,
@@ -187,6 +200,7 @@ async def process_refund(
     refund_data: RefundRequest,
     current_user: dict = get_current_active_user_depends,
     service: PaymentService = get_payment_service_depends,
+    db: AsyncSession = Depends(get_db),
     idempotency: dict = get_idempotency_depends,
 ):
     """
