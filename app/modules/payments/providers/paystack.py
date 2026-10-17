@@ -9,8 +9,9 @@ end-to-end flow is still exercisable without hitting the network.
 
 from __future__ import annotations
 
-import httpx
 import uuid
+
+import httpx
 
 from app.core.config import settings
 from app.modules.payments.providers.base import (

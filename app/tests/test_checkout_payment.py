@@ -9,20 +9,19 @@ Covers:
   - get_payment_by_order returns the updated payment after the webhook
 """
 
-import pytest
 import uuid
-from httpx import AsyncClient
 
+import pytest
 from app.main import app
-from app.models.commission_plan import CommissionPlan
-from app.models.user import User, UserRole
-from app.models.merchant import Merchant, KycStatus
-from app.models.store import Store
 from app.models.category import Category
-from app.models.product import Product, ProductStatus, FulfillmentKind
-from app.models.product_variant import ProductVariant
+from app.models.commission_plan import CommissionPlan
 from app.models.enums import InventoryPolicy
-from app.models.user import Gender
+from app.models.merchant import KycStatus, Merchant
+from app.models.product import FulfillmentKind, Product, ProductStatus
+from app.models.product_variant import ProductVariant
+from app.models.store import Store
+from app.models.user import Gender, User, UserRole
+from httpx import AsyncClient
 
 
 @pytest.fixture
@@ -266,13 +265,18 @@ async def test_get_payment_by_order_access_control(
 
 @pytest.mark.asyncio
 async def test_stub_simulate_completes_payment_end_to_end(
-    client: AsyncClient, buyer_headers: dict, seed_data: dict
+    client: AsyncClient, buyer_headers: dict, seed_data: dict, monkeypatch: pytest.MonkeyPatch
 ):
     """End-to-end: checkout → process_payment → stub simulate → success.
 
     Exercises the full stub fallback flow that a dev/test user experiences
     when no real Paystack credentials are configured.
     """
+    # Force stub mode so the provider generates a local redirect URL
+    # rather than calling the real Paystack API.
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "PAYSTACK_SECRET_KEY", "sk_test_your_test_key_here")
+
     variant_id = seed_data["variant_id"]
 
     # 1. Checkout
