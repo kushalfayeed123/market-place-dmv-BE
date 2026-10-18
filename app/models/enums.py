@@ -22,6 +22,12 @@ class FulfillmentStatus(PyEnum):
     FAILED = "failed"
 
 
+class DeliveryMethod(PyEnum):
+    """Who performs the physical delivery of an order."""
+    MERCHANT = "merchant"          # Merchant (or their own staff) delivers
+    THIRD_PARTY = "third_party"    # Third-party courier/logistics provider
+
+
 class InventoryPolicy(PyEnum):
     TRACKED = "tracked"
     UNTRACKED = "untracked"

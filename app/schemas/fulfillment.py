@@ -25,6 +25,10 @@ class FulfillmentStatus(PyEnum):
 class FulfillmentCreate(BaseModel):
     order_id: str
     type: FulfillmentKindOrder
+    delivery_method: Optional[str] = Field(
+        None,
+        description="Who performs delivery: 'merchant' or 'third_party'. Required for shipment type.",
+    )
     carrier: Optional[str] = None
     tracking_number: Optional[str] = None
     download_token: Optional[str] = None
@@ -36,6 +40,7 @@ class FulfillmentResponse(BaseModel):
     order_id: str
     merchant_id: str
     type: str
+    delivery_method: Optional[str] = None
     status: str
     carrier: Optional[str] = None
     tracking_number: Optional[str] = None

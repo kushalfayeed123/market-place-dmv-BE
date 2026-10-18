@@ -9,18 +9,25 @@ import uuid
 from datetime import datetime, timezone
 
 from app.core.security import to_uuid
+from app.models.enums import DeliveryMethod
 from app.models.inventory import Inventory
 from app.models.ledger_entry import LedgerDirection, LedgerEntry, LedgerEntryType
+from app.models.fulfillment import Fulfillment
 from app.models.merchant import Merchant
+from app.models.notification import NotificationChannel, NotificationType
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.modules.orders.service.base import OrderService
+from app.modules.notifications.service.base import NotificationService
+from app.schemas.notification import NotificationCreate
 from app.schemas.orders import (
     CheckoutRequest,
     CheckoutResponse,
+    FulfillOrderRequest,
+    FulfillOrderResponse,
     OrderApprovalResponse,
     OrderResponse,
     ProofOfPaymentRequest,
@@ -48,14 +55,16 @@ class OrderServiceImpl(OrderService):
     using SQLAlchemy's AsyncSession for query execution.
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, notification_service: NotificationService | None = None):
         """
         Initialize the service with a database session.
 
         Args:
             db: The async SQLAlchemy session to use for queries.
+            notification_service: Optional notification service for sending order notifications.
         """
         self._db = db
+        self._notification_service = notification_service
 
     async def checkout(
         self, checkout_data: CheckoutRequest, buyer_id: str, idempotency_key: str
@@ -155,6 +164,57 @@ class OrderServiceImpl(OrderService):
 
         await self._db.commit()
 
+        # ── Notifications: order placed ─────────────────────────────────
+        # Buyer: order confirmation
+        if self._notification_service:
+            try:
+                buyer_items_summary = ", ".join(
+                    f"{d['quantity']}×{d['product_id']}" for d in order_items_data
+                )
+                await self._notification_service.create_notification(
+                    NotificationCreate(
+                        user_id=buyer_id,
+                        type=NotificationType.ORDER_CONFIRMATION.value,
+                        channel=NotificationChannel.EMAIL.value,
+                        subject=f"Order {new_order.order_number} confirmed",
+                        body=(
+                            f"Your order {new_order.order_number} has been placed and is being processed. "
+                            f"Items: {buyer_items_summary}. Total: {new_order.total_amount} {new_order.currency}."
+                        ),
+                        related_order_id=str(new_order.id),
+                    )
+                )
+                # Buyer: in-app copy
+                await self._notification_service.create_notification(
+                    NotificationCreate(
+                        user_id=buyer_id,
+                        type=NotificationType.ORDER_CONFIRMATION.value,
+                        channel=NotificationChannel.PUSH.value,
+                        subject=f"Order {new_order.order_number} confirmed",
+                        body="Your order has been placed and is being processed.",
+                        related_order_id=str(new_order.id),
+                    )
+                )
+                # Merchant: new order alert (one per merchant in the order)
+                merchant_ids = {str(d["merchant_id"]) for d in order_items_data}
+                for m_id in merchant_ids:
+                    await self._notification_service.create_notification(
+                        NotificationCreate(
+                            merchant_id=m_id,
+                            type=NotificationType.MERCHANT_NEW_ORDER.value,
+                            channel=NotificationChannel.PUSH.value,
+                            subject=f"New order {new_order.order_number}",
+                            body=(
+                                f"You have a new order ({new_order.order_number}) "
+                                f"totaling {new_order.total_amount} {new_order.currency}."
+                            ),
+                            related_order_id=str(new_order.id),
+                        )
+                    )
+            except Exception:
+                # Notifications must never block checkout.
+                pass
+
         return CheckoutResponse(
             id=str(new_order.id),
             order_number=new_order.order_number,
@@ -225,6 +285,26 @@ class OrderServiceImpl(OrderService):
             if merchant:
                 merchant_name = merchant.business_name
 
+        # Determine fulfillment status from related fulfillments
+        fulfillment_status = None
+        try:
+            ff_result = await self._db.execute(
+                select(Fulfillment).where(Fulfillment.order_id == order.id)
+            )
+            fulfillments = ff_result.scalars().all()
+            if fulfillments:
+                statuses = {f.status for f in fulfillments}
+                if all(s in (FulfillmentStatus.DELIVERED.value, FulfillmentStatus.DELIVERED_DIGITAL.value) for s in statuses):
+                    fulfillment_status = "delivered"
+                elif any(s in (FulfillmentStatus.SHIPPED.value,) for s in statuses):
+                    fulfillment_status = "shipped"
+                elif any(s in (FulfillmentStatus.PENDING.value,) for s in statuses):
+                    fulfillment_status = "pending"
+                elif any(s in (FulfillmentStatus.FAILED.value,) for s in statuses):
+                    fulfillment_status = "failed"
+        except Exception:
+            pass
+
         return OrderResponse(
             id=str(order.id),
             order_number=order.order_number,
@@ -237,6 +317,9 @@ class OrderServiceImpl(OrderService):
             merchant_id=merchant_id_str,
             merchant_name=merchant_name,
             payment_status="paid" if order.status == OrderStatus.PAID.value else None,
+            fulfillment_status=fulfillment_status,
+            fulfilled_at=order.fulfilled_at,
+            fulfillment_summary=order.fulfillment_summary,
             created_at=order.created_at,
             updated_at=order.updated_at,
             items=[
@@ -473,6 +556,51 @@ class OrderServiceImpl(OrderService):
         await self._db.commit()
         await self._db.refresh(order)
 
+        # ── Notifications: payment approved ─────────────────────────────
+        if self._notification_service:
+            try:
+                # Buyer: payment confirmed
+                await self._notification_service.create_notification(
+                    NotificationCreate(
+                        user_id=str(order.buyer_id),
+                        type=NotificationType.PAYMENT_CONFIRMED.value,
+                        channel=NotificationChannel.EMAIL.value,
+                        subject=f"Payment confirmed — Order {order.order_number}",
+                        body=(
+                            f"Your payment for order {order.order_number} has been confirmed by the merchant. "
+                            f"Your order is now being prepared for fulfillment."
+                        ),
+                        related_order_id=str(order.id),
+                    )
+                )
+                await self._notification_service.create_notification(
+                    NotificationCreate(
+                        user_id=str(order.buyer_id),
+                        type=NotificationType.PAYMENT_CONFIRMED.value,
+                        channel=NotificationChannel.PUSH.value,
+                        subject=f"Payment confirmed — Order {order.order_number}",
+                        body="Your payment has been confirmed. Your order is being prepared.",
+                        related_order_id=str(order.id),
+                    )
+                )
+                # Merchant: payout released
+                await self._notification_service.create_notification(
+                    NotificationCreate(
+                        merchant_id=merchant_id,
+                        type=NotificationType.PAYOUT_RELEASED.value,
+                        channel=NotificationChannel.PUSH.value,
+                        subject=f"Payout released — Order {order.order_number}",
+                        body=(
+                            f"Funds for order {order.order_number} ({total_release} {merchant_items[0].currency}) "
+                            f"have been released to your wallet."
+                        ),
+                        related_order_id=str(order.id),
+                    )
+                )
+            except Exception:
+                # Notifications must never block order approval.
+                pass
+
         return OrderApprovalResponse(
             order_id=str(order.id),
             order_number=order.order_number,
@@ -481,4 +609,123 @@ class OrderServiceImpl(OrderService):
             ledger_entries_created=1,
             message=f"Order approved. {len(merchant_items)} item(s) marked for payout.",
             updated_at=order.updated_at,
+        )
+
+    async def fulfill_order(
+        self,
+        order_id: str,
+        merchant_id: str,
+        fulfillment_summary: str | None = None,
+    ) -> FulfillOrderResponse:
+        """
+        Merchant marks an order fully fulfilled (all items delivered).
+
+        Verifies the merchant owns items in the order, that the order is paid,
+        and that all related fulfillments are in a delivered state before
+        transitioning the order to 'fulfilled'.
+
+        Args:
+            order_id: The order ID.
+            merchant_id: The merchant's ID (must own at least one order item).
+            fulfillment_summary: Optional human-readable fulfillment summary.
+
+        Returns:
+            FulfillmentOrderResponse with the new order status.
+
+        Raises:
+            ValueError: If the order is not found, not owned by the merchant,
+                        not paid, or not all fulfillments are delivered.
+        """
+        result = await self._db.execute(
+            select(Order).where(Order.id == to_uuid(order_id))
+        )
+        order = result.scalar_one_or_none()
+        if order is None:
+            raise ValueError("Order not found")
+
+        # Verify this merchant owns at least one item in the order
+        items_result = await self._db.execute(
+            select(OrderItem).where(
+                OrderItem.order_id == order.id,
+                OrderItem.merchant_id == to_uuid(merchant_id),
+            )
+        )
+        merchant_items = items_result.scalars().all()
+        if not merchant_items:
+            raise ValueError("Not authorized to fulfill this order")
+
+        if order.status not in (OrderStatus.PAID.value, OrderStatus.PARTIALLY_FULFILLED.value):
+            raise ValueError(
+                f"Order cannot be fulfilled in status '{order.status}'"
+            )
+
+        # Check all fulfillments for this order are delivered
+        ff_result = await self._db.execute(
+            select(Fulfillment).where(Fulfillment.order_id == order.id)
+        )
+        fulfillments = ff_result.scalars().all()
+        if not fulfillments:
+            raise ValueError("No fulfillments found for this order")
+
+        delivered_statuses = {
+            FulfillmentStatus.DELIVERED.value,
+            FulfillmentStatus.DELIVERED_DIGITAL.value,
+        }
+        undelivered = [
+            f for f in fulfillments if f.status not in delivered_statuses
+        ]
+        if undelivered:
+            raise ValueError(
+                f"Cannot fulfill order: {len(undelivered)} fulfillment(s) not yet delivered"
+            )
+
+        # Transition order status
+        if order.status == OrderStatus.PARTIALLY_FULFILLED.value:
+            order.status = OrderStatus.FULFILLED.value
+        else:
+            order.status = OrderStatus.FULFILLED.value
+        order.fulfilled_at = datetime.now(timezone.utc)
+        if fulfillment_summary:
+            order.fulfillment_summary = fulfillment_summary
+
+        await self._db.commit()
+        await self._db.refresh(order)
+
+        # ── Notifications: order completed ──────────────────────────────
+        if self._notification_service:
+            try:
+                # Buyer: order completed
+                await self._notification_service.create_notification(
+                    NotificationCreate(
+                        user_id=str(order.buyer_id),
+                        type=NotificationType.ORDER_COMPLETED.value,
+                        channel=NotificationChannel.EMAIL.value,
+                        subject=f"Order {order.order_number} completed",
+                        body=(
+                            f"Your order {order.order_number} has been fulfilled and is complete. "
+                            f"Thank you for your purchase!"
+                        ),
+                        related_order_id=str(order.id),
+                    )
+                )
+                await self._notification_service.create_notification(
+                    NotificationCreate(
+                        user_id=str(order.buyer_id),
+                        type=NotificationType.ORDER_COMPLETED.value,
+                        channel=NotificationChannel.PUSH.value,
+                        subject=f"Order {order.order_number} completed",
+                        body="Your order has been delivered. Thank you for shopping with us!",
+                        related_order_id=str(order.id),
+                    )
+                )
+            except Exception:
+                pass
+
+        return FulfillOrderResponse(
+            order_id=str(order.id),
+            order_number=order.order_number,
+            status=order.status,
+            fulfillment_status="delivered",
+            fulfilled_at=order.fulfilled_at,
+            message="Order marked as fulfilled.",
         )

@@ -8,15 +8,18 @@ import uuid
 
 from app.core.security import to_uuid
 from app.models.ledger_entry import LedgerDirection, LedgerEntry, LedgerEntryType
+from app.models.notification import NotificationChannel, NotificationType
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
 from app.models.webhook_event import WebhookEvent
+from app.modules.notifications.service.base import NotificationService
 from app.modules.payments.providers.registry import (
     is_provider_implemented,
     get_provider,
 )
 from app.modules.payments.service.base import PaymentService
+from app.schemas.notification import NotificationCreate
 from app.schemas.payments import (
     PaymentProcess,
     PaymentResponse,
@@ -31,19 +34,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class PaymentServiceImpl(PaymentService):
     """
     Database-backed implementation of PaymentService.
-    
+
     This class encapsulates all database operations for payments,
     using SQLAlchemy's AsyncSession for query execution.
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, notification_service: NotificationService | None = None):
         """
         Initialize the service with a database session.
-        
+
         Args:
             db: The async SQLAlchemy session to use for queries.
+            notification_service: Optional notification service.
         """
         self._db = db
+        self._notification_service = notification_service
 
     async def process_payment(
         self, payment_data: PaymentProcess, user_id: str
@@ -442,8 +447,93 @@ class PaymentServiceImpl(PaymentService):
                         if o and o.status == "pending":
                             o.status = "paid"
                         await self._db.refresh(pt)
+
+                        # ── Notifications: payment confirmed ──────────────
+                        if self._notification_service:
+                            try:
+                                items_result = await self._db.execute(
+                                    select(OrderItem).where(OrderItem.order_id == o.id)
+                                )
+                                order_items = items_result.scalars().all()
+                                merchant_ids = {str(i.merchant_id) for i in order_items}
+
+                                await self._notification_service.create_notification(
+                                    NotificationCreate(
+                                        user_id=str(o.buyer_id),
+                                        type=NotificationType.PAYMENT_CONFIRMED.value,
+                                        channel=NotificationChannel.EMAIL.value,
+                                        subject=f"Payment confirmed — Order {o.order_number}",
+                                        body=(
+                                            f"Your payment for order {o.order_number} has been confirmed. "
+                                            f"Your order is now being prepared for fulfillment."
+                                        ),
+                                        related_order_id=str(o.id),
+                                        related_payment_id=str(pt.id),
+                                    )
+                                )
+                                for m_id in merchant_ids:
+                                    await self._notification_service.create_notification(
+                                        NotificationCreate(
+                                            merchant_id=m_id,
+                                            type=NotificationType.MERCHANT_NEW_ORDER.value,
+                                            channel=NotificationChannel.PUSH.value,
+                                            subject=f"New order paid — {o.order_number}",
+                                            body=(
+                                                f"Order {o.order_number} has been paid "
+                                                f"({o.total_amount} {o.currency}). Please fulfill."
+                                            ),
+                                            related_order_id=str(o.id),
+                                            related_payment_id=str(pt.id),
+                                        )
+                                    )
+                            except Exception:
+                                pass
             except (ValueError, TypeError):
                 pass
+
+        # Payment failure → notify buyer
+        failure_events = {"charge.failed", "payment.failed", "payment.failure"}
+        if event_type in failure_events:
+            import json as _json
+            try:
+                payload_dict = _json.loads(payload) if isinstance(payload, (str, bytes)) else payload
+                ref = None
+                if isinstance(payload_dict, dict):
+                    ref = payload_dict.get("reference") or (
+                        payload_dict.get("data", {}) or {}
+                    ).get("reference")
+                if ref:
+                    existing = await self._db.execute(
+                        select(PaymentTransaction).where(
+                            PaymentTransaction.provider == provider,
+                            PaymentTransaction.provider_reference == ref,
+                        )
+                    )
+                    pt = existing.scalar_one_or_none()
+                    if pt and pt.status != "failed":
+                        pt.status = "failed"
+                        o = await self._db.get(Order, pt.order_id)
+                        if self._notification_service and o:
+                            try:
+                                await self._notification_service.create_notification(
+                                    NotificationCreate(
+                                        user_id=str(o.buyer_id),
+                                        type=NotificationType.PAYMENT_FAILED.value,
+                                        channel=NotificationChannel.EMAIL.value,
+                                        subject=f"Payment failed — Order {o.order_number}",
+                                        body=(
+                                            f"Your payment for order {o.order_number} could not be completed. "
+                                            f"Please try again or contact support."
+                                        ),
+                                        related_order_id=str(o.id),
+                                        related_payment_id=str(pt.id),
+                                    )
+                                )
+                            except Exception:
+                                pass
+            except (ValueError, TypeError):
+                pass
+
         await self._db.commit()
 
         return WebhookResponse(

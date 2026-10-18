@@ -9,7 +9,7 @@ from sqlalchemy.sql import func
 from enum import Enum as PyEnum
 
 from app.db.base import BaseModel
-from app.models.enums import FulfillmentKindOrder, FulfillmentStatus
+from app.models.enums import DeliveryMethod, FulfillmentKindOrder, FulfillmentStatus
 
 
 class OrderStatus(PyEnum):
@@ -34,6 +34,11 @@ class Order(BaseModel):
     total_amount = Column(BIGINT, nullable=False)  # Minor units
     # VARCHAR(255): unique column, MySQL cannot index TEXT without a prefix length
     idempotency_key = Column(String(255), nullable=True, unique=True)
+    # Timestamp when the order reached a fully fulfilled state.
+    fulfilled_at = Column(DateTime(timezone=True), nullable=True)
+    # Human-readable summary of how the order was fulfilled (e.g. carrier,
+    # tracking number, or digital download token).
+    fulfillment_summary = Column(Text, nullable=True)
 
     # Indexes and constraints
     __table_args__ = (

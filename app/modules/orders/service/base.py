@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from app.schemas.orders import (
     CheckoutRequest,
     CheckoutResponse,
+    FulfillOrderResponse,
     OrderResponse,
     ProofOfPaymentRequest,
     ProofOfPaymentResponse,
@@ -131,5 +132,29 @@ class OrderService(ABC):
         Raises:
             ValueError: If the order is not found, not owned by the merchant,
                         or not in 'awaiting_approval' status.
+        """
+        ...
+
+    @abstractmethod
+    async def fulfill_order(
+        self,
+        order_id: str,
+        merchant_id: str,
+        fulfillment_summary: str | None = None,
+    ) -> FulfillOrderResponse:
+        """
+        Merchant marks an order fully fulfilled (all items delivered).
+
+        Args:
+            order_id: The order ID.
+            merchant_id: The merchant's ID (must own order items).
+            fulfillment_summary: Optional human-readable fulfillment summary.
+
+        Returns:
+            Fulfillment response with the new order status.
+
+        Raises:
+            ValueError: If the order is not found, not owned by the merchant,
+                        not paid, or not all fulfillments are delivered.
         """
         ...

@@ -19,6 +19,8 @@ from app.schemas.notification import NotificationCreate
 from app.schemas.orders import (
     CheckoutRequest,
     CheckoutResponse,
+    FulfillOrderRequest,
+    FulfillOrderResponse,
     OrderResponse,
     ProofOfPaymentRequest,
     ProofOfPaymentResponse,
@@ -331,17 +333,65 @@ async def approve_order(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
         )
 
-    # Notify the buyer
+    # Notify the buyer (payment confirmed) — also handled inside the service,
+    # but we keep a router-level notification for idempotency-replay safety.
     order = await service.get_order(order_id)
     if order:
         await notification_service.create_notification(
             NotificationCreate(
                 user_id=str(order.buyer_id),
-                type="order_approved",
-                subject=f"Order {response_data.order_number} approved",
-                body="Your order has been approved by the merchant.",
+                type="payment_confirmed",
+                subject=f"Payment confirmed — Order {response_data.order_number}",
+                body="Your payment has been confirmed by the merchant.",
                 related_order_id=order_id,
             )
+        )
+
+    await finalize_idempotency(
+        request, None, status_code=status.HTTP_200_OK,
+        response_body=response_data.model_dump(),
+    )
+    return response_data
+
+
+@router.post("/{order_id}/fulfill", response_model=FulfillOrderResponse)
+async def fulfill_order(
+    request: Request,
+    order_id: str,
+    fulfillment_data: FulfillOrderRequest,
+    current_user: dict = get_current_active_user_depends,
+    service: OrderService = get_order_service_depends,
+    merchant_service: MerchantService = get_merchant_service_depends,
+    idempotency: dict = get_idempotency_depends,
+):
+    """Merchant marks an order fully fulfilled (all items delivered)."""
+    if current_user.role.value not in ("merchant_owner", "merchant_staff", "platform_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only merchants can fulfill orders",
+        )
+
+    resolved_merchant_id = None
+    if current_user.role.value == "merchant_owner":
+        merchant = await merchant_service.get_merchant_by_owner(str(current_user.id))
+        if merchant:
+            resolved_merchant_id = str(merchant.id)
+
+    if not resolved_merchant_id and current_user.role.value != "platform_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Could not determine merchant for this user",
+        )
+
+    try:
+        response_data = await service.fulfill_order(
+            order_id,
+            resolved_merchant_id or "",
+            fulfillment_data.fulfillment_summary,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
         )
 
     await finalize_idempotency(

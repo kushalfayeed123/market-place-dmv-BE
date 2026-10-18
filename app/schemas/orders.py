@@ -4,8 +4,10 @@ Pydantic schemas for orders requests and responses.
 """
 
 from datetime import datetime
+from typing import Optional
 
 from pydantic import BaseModel, Field
+from enum import Enum as PyEnum
 
 
 class CartItem(BaseModel):
@@ -57,9 +59,34 @@ class OrderResponse(BaseModel):
     merchant_id: str | None = None
     merchant_name: str | None = None
     payment_status: str | None = None
+    fulfillment_status: str | None = None
+    fulfilled_at: Optional[datetime] = None
+    fulfillment_summary: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     items: list[dict]  # Order item details
+
+
+class DeliveryMethod(PyEnum):
+    MERCHANT = "merchant"
+    THIRD_PARTY = "third_party"
+
+
+class FulfillOrderRequest(BaseModel):
+    """Merchant marks an order's fulfillment complete (all items delivered)."""
+    fulfillment_summary: Optional[str] = Field(
+        None,
+        description="Summary of how the order was fulfilled (carrier, tracking, download link, etc.)",
+    )
+
+
+class FulfillOrderResponse(BaseModel):
+    order_id: str
+    order_number: str
+    status: str
+    fulfillment_status: str
+    fulfilled_at: Optional[datetime] = None
+    message: str
 
 
 class OrderItemResponse(BaseModel):

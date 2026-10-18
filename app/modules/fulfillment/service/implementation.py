@@ -5,10 +5,18 @@ Handles database operations for fulfillment using SQLAlchemy.
 """
 
 
+from datetime import UTC
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.security import to_uuid
+from app.models.enums import NotificationType
 from app.models.fulfillment import Fulfillment, FulfillmentStatus
+from app.models.notification import NotificationChannel
 from app.models.order import Order, OrderStatus
 from app.modules.fulfillment.service.base import FulfillmentService
+from app.modules.notifications.service.base import NotificationService
 from app.schemas.fulfillment import (
     DigitalDeliveryUpdate,
     FulfillmentCreate,
@@ -16,26 +24,27 @@ from app.schemas.fulfillment import (
     FulfillmentStatusUpdate,
     ShipmentUpdate,
 )
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.schemas.notification import NotificationCreate
 
 
 class FulfillmentServiceImpl(FulfillmentService):
     """
     Database-backed implementation of FulfillmentService.
-    
+
     This class encapsulates all database operations for fulfillment,
     using SQLAlchemy's AsyncSession for query execution.
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, notification_service: NotificationService | None = None):
         """
         Initialize the service with a database session.
-        
+
         Args:
             db: The async SQLAlchemy session to use for queries.
+            notification_service: Optional notification service.
         """
         self._db = db
+        self._notification_service = notification_service
 
     async def create_fulfillment(
         self, fulfillment_data: FulfillmentCreate, merchant_id: str | None = None
@@ -90,6 +99,7 @@ class FulfillmentServiceImpl(FulfillmentService):
             order_id=order.id,
             merchant_id=to_uuid(merchant_id) if merchant_id else None,
             type=fulfillment_data.type.value,
+            delivery_method=fulfillment_data.delivery_method,
             status=FulfillmentStatus.PENDING.value,
             carrier=fulfillment_data.carrier,
             tracking_number=fulfillment_data.tracking_number,
@@ -98,6 +108,31 @@ class FulfillmentServiceImpl(FulfillmentService):
         )
 
         self._db.add(new_fulfillment)
+        await self._db.commit()
+        await self._db.refresh(new_fulfillment)
+
+        # ── Notification: fulfillment created ───────────────────────────
+        if self._notification_service:
+            try:
+                # Buyer: shipping update
+                carrier_text = f" via {new_fulfillment.carrier}" if new_fulfillment.carrier else ""
+                tracking_text = f" (tracking: {new_fulfillment.tracking_number})" if new_fulfillment.tracking_number else ""
+                await self._notification_service.create_notification(
+                    NotificationCreate(
+                        user_id=str(order.buyer_id),
+                        type=NotificationType.SHIPPING_UPDATE.value,
+                        channel=NotificationChannel.EMAIL.value,
+                        subject=f"Order {order.order_number} is being prepared",
+                        body=(
+                            f"Your order {order.order_number} has been handed off for fulfillment{carrier_text}{tracking_text}."
+                        ),
+                        related_order_id=str(order.id),
+                    )
+                )
+            except Exception:
+                pass
+
+        return self._to_response(new_fulfillment)
         await self._db.commit()
         await self._db.refresh(new_fulfillment)
 
@@ -199,11 +234,93 @@ class FulfillmentServiceImpl(FulfillmentService):
             fulfillment.tracking_number = shipment_data.tracking_number
         if shipment_data.status is not None:
             fulfillment.status = shipment_data.status.value
+            if fulfillment.status in (
+                FulfillmentStatus.DELIVERED.value,
+                FulfillmentStatus.DELIVERED_DIGITAL.value,
+            ):
+                from datetime import datetime as _dt
+                fulfillment.delivered_at = _dt.now(UTC)
 
         await self._db.commit()
         await self._db.refresh(fulfillment)
 
+        # ── Notification: shipping update ──────────────────────────────
+        if self._notification_service and shipment_data.status is not None:
+            try:
+                from app.models.order import Order as _Order
+                order_result = await self._db.execute(
+                    select(_Order).where(_Order.id == fulfillment.order_id)
+                )
+                order = order_result.scalar_one_or_none()
+                if order:
+                    status_label = fulfillment.status.replace("_", " ").title()
+                    carrier_text = f" via {fulfillment.carrier}" if fulfillment.carrier else ""
+                    tracking_text = f" (tracking: {fulfillment.tracking_number})" if fulfillment.tracking_number else ""
+                    await self._notification_service.create_notification(
+                        NotificationCreate(
+                            user_id=str(order.buyer_id),
+                            type=NotificationType.SHIPPING_UPDATE.value,
+                            channel=NotificationChannel.EMAIL.value,
+                            subject=f"Order {order.order_number} — {status_label}",
+                            body=(
+                                f"Your order {order.order_number} is now {status_label.lower()}{carrier_text}{tracking_text}."
+                            ),
+                            related_order_id=str(order.id),
+                        )
+                    )
+                    # Check if all fulfillments are delivered → mark order fulfilled
+                    await self._maybe_mark_order_fulfilled(order.id)
+            except Exception:
+                pass
+
         return self._to_response(fulfillment)
+
+    async def _maybe_mark_order_fulfilled(self, order_id) -> None:
+        """If all fulfillments for an order are delivered, mark the order fulfilled."""
+        try:
+            ff_result = await self._db.execute(
+                select(Fulfillment).where(Fulfillment.order_id == order_id)
+            )
+            fulfillments = ff_result.scalars().all()
+            if not fulfillments:
+                return
+            delivered_statuses = {
+                FulfillmentStatus.DELIVERED.value,
+                FulfillmentStatus.DELIVERED_DIGITAL.value,
+            }
+            if not all(f.status in delivered_statuses for f in fulfillments):
+                return
+
+            from app.models.order import Order as _Order
+            from app.models.order import OrderStatus as _OrderStatus
+            order = await self._db.get(_Order, order_id)
+            if not order or order.status != _OrderStatus.PAID.value:
+                return
+            order.status = _OrderStatus.FULFILLED.value
+            from datetime import datetime as _dt
+            order.fulfilled_at = _dt.now(UTC)
+            await self._db.commit()
+
+            # Notify buyer: order completed
+            if self._notification_service:
+                try:
+                    await self._notification_service.create_notification(
+                        NotificationCreate(
+                            user_id=str(order.buyer_id),
+                            type=NotificationType.ORDER_COMPLETED.value,
+                            channel=NotificationChannel.EMAIL.value,
+                            subject=f"Order {order.order_number} completed",
+                            body=(
+                                f"Your order {order.order_number} has been delivered. "
+                                f"Thank you for your purchase!"
+                            ),
+                            related_order_id=str(order.id),
+                        )
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     async def update_digital_delivery(
         self, delivery_data: DigitalDeliveryUpdate, fulfillment_id: str | None = None
@@ -233,9 +350,41 @@ class FulfillmentServiceImpl(FulfillmentService):
             fulfillment.downloads_used = delivery_data.downloads_used
         if delivery_data.status is not None:
             fulfillment.status = delivery_data.status.value
+            if fulfillment.status in (
+                FulfillmentStatus.DELIVERED.value,
+                FulfillmentStatus.DELIVERED_DIGITAL.value,
+            ):
+                from datetime import datetime as _dt
+                fulfillment.delivered_at = _dt.now(UTC)
 
         await self._db.commit()
         await self._db.refresh(fulfillment)
+
+        # ── Notification: digital delivery ready ────────────────────────
+        if self._notification_service and delivery_data.status is not None:
+            try:
+                from app.models.order import Order as _Order
+                order_result = await self._db.execute(
+                    select(_Order).where(_Order.id == fulfillment.order_id)
+                )
+                order = order_result.scalar_one_or_none()
+                if order:
+                    await self._notification_service.create_notification(
+                        NotificationCreate(
+                            user_id=str(order.buyer_id),
+                            type=NotificationType.DIGITAL_DELIVERY_READY.value,
+                            channel=NotificationChannel.EMAIL.value,
+                            subject=f"Your digital download is ready — Order {order.order_number}",
+                            body=(
+                                f"Your digital item for order {order.order_number} is ready for download. "
+                                f"Use the download link provided in your order details."
+                            ),
+                            related_order_id=str(order.id),
+                        )
+                    )
+                    await self._maybe_mark_order_fulfilled(order.id)
+            except Exception:
+                pass
 
         return self._to_response(fulfillment)
 
@@ -264,9 +413,43 @@ class FulfillmentServiceImpl(FulfillmentService):
             raise ValueError("Fulfillment not found")
 
         fulfillment.status = status_data.status.value
+        if fulfillment.status in (
+            FulfillmentStatus.DELIVERED.value,
+            FulfillmentStatus.DELIVERED_DIGITAL.value,
+        ):
+            from datetime import datetime as _dt
+            fulfillment.delivered_at = _dt.now(UTC)
 
         await self._db.commit()
         await self._db.refresh(fulfillment)
+
+        # ── Notification: shipping update ──────────────────────────────
+        if self._notification_service:
+            try:
+                from app.models.order import Order as _Order
+                order_result = await self._db.execute(
+                    select(_Order).where(_Order.id == fulfillment.order_id)
+                )
+                order = order_result.scalar_one_or_none()
+                if order:
+                    status_label = fulfillment.status.replace("_", " ").title()
+                    carrier_text = f" via {fulfillment.carrier}" if fulfillment.carrier else ""
+                    tracking_text = f" (tracking: {fulfillment.tracking_number})" if fulfillment.tracking_number else ""
+                    await self._notification_service.create_notification(
+                        NotificationCreate(
+                            user_id=str(order.buyer_id),
+                            type=NotificationType.SHIPPING_UPDATE.value,
+                            channel=NotificationChannel.EMAIL.value,
+                            subject=f"Order {order.order_number} — {status_label}",
+                            body=(
+                                f"Your order {order.order_number} is now {status_label.lower()}{carrier_text}{tracking_text}."
+                            ),
+                            related_order_id=str(order.id),
+                        )
+                    )
+                    await self._maybe_mark_order_fulfilled(order.id)
+            except Exception:
+                pass
 
         return self._to_response(fulfillment)
 
@@ -278,6 +461,7 @@ class FulfillmentServiceImpl(FulfillmentService):
             order_id=str(fulfillment.order_id),
             merchant_id=str(fulfillment.merchant_id),
             type=fulfillment.type,
+            delivery_method=fulfillment.delivery_method,
             status=fulfillment.status,
             carrier=fulfillment.carrier,
             tracking_number=fulfillment.tracking_number,

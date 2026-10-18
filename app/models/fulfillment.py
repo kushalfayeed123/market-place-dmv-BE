@@ -8,7 +8,7 @@ from app.db.types import UUID
 from sqlalchemy.sql import func
 
 from app.db.base import BaseModel
-from app.models.enums import FulfillmentKindOrder, FulfillmentStatus
+from app.models.enums import DeliveryMethod, FulfillmentKindOrder, FulfillmentStatus
 
 
 class Fulfillment(BaseModel):
@@ -17,6 +17,7 @@ class Fulfillment(BaseModel):
     order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False)
     merchant_id = Column(UUID(as_uuid=True), ForeignKey("merchants.id", ondelete="CASCADE"), nullable=False)
     type = Column(String(50), nullable=False)  # Using String instead of Enum for flexibility
+    delivery_method = Column(String(50), nullable=True)  # 'merchant' or 'third_party'
     status = Column(String(50), nullable=False, default=FulfillmentStatus.PENDING.value)
     carrier = Column(Text, nullable=True)
     # VARCHAR(255): indexed column, MySQL cannot index TEXT without a prefix length

@@ -43,10 +43,14 @@ class NotificationStatus(PyEnum):
 class NotificationType(PyEnum):
     ORDER_CONFIRMATION = "order_confirmation"
     PAYMENT_CONFIRMED = "payment_confirmed"
+    PAYMENT_FAILED = "payment_failed"
     SHIPPING_UPDATE = "shipping_update"
     ORDER_CANCELLED = "order_cancelled"
     REFUND_ISSUED = "refund_issued"
     MERCHANT_NEW_ORDER = "merchant_new_order"
+    DIGITAL_DELIVERY_READY = "digital_delivery_ready"
+    ORDER_COMPLETED = "order_completed"
+    PAYOUT_RELEASED = "payout_released"
 
 
 class Notification(BaseModel):
