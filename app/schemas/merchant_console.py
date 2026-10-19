@@ -35,6 +35,68 @@ class MerchantOrderListItem(BaseModel):
     status: str
 
 
+# ── Order detail (merchant-facing, full) ──────────────────────────────────
+
+class MerchantOrderItemDetail(BaseModel):
+    id: str
+    product_id: str
+    product_title: str
+    variant_id: Optional[str] = None
+    variant_sku: Optional[str] = None
+    image_url: Optional[str] = None
+    quantity: int
+    unit_price: int            # minor units
+    currency: str
+    line_total: int            # minor units
+
+
+class MerchantOrderBuyer(BaseModel):
+    id: str
+    name: str
+    email: str
+    phone: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+
+class MerchantOrderPayment(BaseModel):
+    """Payment record for an order — the merchant-facing "mode of payment"."""
+    status: Optional[str] = None       # e.g. success | failed | pending_verification
+    provider: Optional[str] = None     # e.g. paystack | bank_transfer | cash
+    provider_reference: Optional[str] = None
+    amount: Optional[int] = None       # minor units
+    currency: Optional[str] = None
+
+
+class MerchantOrderFulfillment(BaseModel):
+    id: str
+    status: str
+    type: str
+    carrier: Optional[str] = None
+    tracking_number: Optional[str] = None
+    delivery_method: Optional[str] = None
+    delivered_at: Optional[datetime] = None
+
+
+class MerchantOrderDetail(BaseModel):
+    id: str
+    order_number: str
+    status: str
+    currency: str
+    total_amount: int                  # minor units — full order total
+    item_count: int
+    created_at: datetime
+    updated_at: datetime
+    payment_status: Optional[str] = None
+    fulfillment_status: Optional[str] = None
+    fulfilled_at: Optional[datetime] = None
+    fulfillment_summary: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    buyer: MerchantOrderBuyer
+    items: list[MerchantOrderItemDetail]
+    payment: Optional[MerchantOrderPayment] = None
+    fulfillments: list[MerchantOrderFulfillment] = []
+
+
 class MerchantProductListItem(BaseModel):
     id: str
     title: str

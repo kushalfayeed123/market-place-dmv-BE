@@ -29,6 +29,7 @@ merchant FK.
 """
 
 from datetime import UTC, datetime
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -37,11 +38,13 @@ from app.db.session import get_db
 from app.models.conversation import Conversation
 from app.models.dispute import Dispute
 from app.models.fulfillment import Fulfillment
+from app.models.enums import FulfillmentStatus
 from app.models.inventory import Inventory
 from app.models.merchant import Merchant
 from app.models.merchant_payout_account import MerchantPayoutAccount
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
+from app.models.payment_transaction import PaymentTransaction
 from app.models.payout import Payout
 from app.models.product import Product, ProductStatus
 from app.models.product_variant import ProductVariant
@@ -50,7 +53,12 @@ from app.schemas.merchant_console import (
     AttentionResponse,
     ConversationListItem,
     DisputeListItem,
+    MerchantOrderBuyer,
+    MerchantOrderItemDetail,
+    MerchantOrderFulfillment,
     MerchantOrderListItem,
+    MerchantOrderDetail,
+    MerchantOrderPayment,
     MerchantProductListItem,
     MerchantShipmentListItem,
     PayoutAccountStatusResponse,
@@ -268,6 +276,180 @@ async def list_merchant_orders(
         )
         for r in rows
     ]
+
+
+@router.get(
+    "/merchants/{merchant_id}/orders/{order_id}",
+    response_model=MerchantOrderDetail,
+)
+async def get_merchant_order_detail(
+    merchant_id: str,
+    order_id: str,
+    current_user: User = get_current_active_user_depends,
+    db: AsyncSession = get_db_depends,
+):
+    """Full order details for a merchant that owns items in the order.
+
+    Returns the buyer, the line items this merchant sells, the payment
+    record (mode of payment), and the order's fulfillments so the merchant
+    console can render an order detail page with inline actions.
+    """
+    merchant = await _require_merchant_access(merchant_id, current_user, db)
+    mid = to_uuid(merchant.id)
+    is_admin = current_user.role == UserRole.PLATFORM_ADMIN
+
+    order = await db.get(Order, to_uuid(order_id))
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order not found",
+        )
+
+    # Non-admin merchants may only read orders they have items in.
+    if not is_admin:
+        owned = await db.scalar(
+            select(func.count())
+            .select_from(OrderItem)
+            .where(OrderItem.order_id == order.id)
+            .where(OrderItem.merchant_id == mid)
+        )
+        if not owned:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to view this order",
+            )
+
+    # Line items (merchants see only their own items; admins see all).
+    items_q = select(OrderItem).where(OrderItem.order_id == order.id)
+    if not is_admin:
+        items_q = items_q.where(OrderItem.merchant_id == mid)
+    order_items = (await db.execute(items_q)).scalars().all()
+
+    # Batch-load products + variants for titles / SKUs / images.
+    pids = [it.product_id for it in order_items]
+    vids = [it.variant_id for it in order_items if it.variant_id]
+    products = (
+        (await db.execute(select(Product).where(Product.id.in_(pids)))).scalars().all()
+        if pids else []
+    )
+    variants = (
+        (await db.execute(select(ProductVariant).where(ProductVariant.id.in_(vids)))).scalars().all()
+        if vids else []
+    )
+    prod_map = {str(p.id): p for p in products}
+    variant_map = {str(v.id): v for v in variants}
+
+    items_out: list[MerchantOrderItemDetail] = []
+    for it in order_items:
+        p = prod_map.get(str(it.product_id))
+        image_url = None
+        if p and p.urls:
+            try:
+                urls = json.loads(p.urls)
+                image_url = urls[0] if isinstance(urls, list) and urls else None
+            except (ValueError, TypeError):
+                image_url = None
+        v = variant_map.get(str(it.variant_id)) if it.variant_id else None
+        items_out.append(MerchantOrderItemDetail(
+            id=str(it.id),
+            product_id=str(it.product_id),
+            product_title=p.title if p else "—",
+            variant_id=str(it.variant_id) if it.variant_id else None,
+            variant_sku=v.sku if v else None,
+            image_url=image_url,
+            quantity=it.quantity,
+            unit_price=it.unit_price,
+            currency=it.currency,
+            line_total=it.line_total,
+        ))
+
+    # Buyer details.
+    buyer_obj = await db.get(User, order.buyer_id)
+    if buyer_obj:
+        buyer_name = f"{buyer_obj.first_name or ''} {buyer_obj.last_name or ''}".strip()
+        if not buyer_name:
+            buyer_name = (buyer_obj.email or "").split("@")[0]
+        buyer = MerchantOrderBuyer(
+            id=str(buyer_obj.id),
+            name=buyer_name,
+            email=buyer_obj.email or "",
+            phone=buyer_obj.phone,
+            avatar_url=buyer_obj.avatar_url,
+        )
+    else:
+        buyer = MerchantOrderBuyer(id=str(order.buyer_id), name="—", email="")
+
+    # Payment record (mode of payment). Newest transaction wins for display.
+    pt_rows = (
+        await db.execute(
+            select(PaymentTransaction)
+            .where(PaymentTransaction.order_id == order.id)
+            .order_by(PaymentTransaction.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    payment = None
+    if pt_rows:
+        payment = MerchantOrderPayment(
+            status=pt_rows.status,
+            provider=pt_rows.provider,
+            provider_reference=pt_rows.provider_reference,
+            amount=pt_rows.amount,
+            currency=pt_rows.currency,
+        )
+
+    # Fulfillments.
+    ff_rows = (
+        await db.execute(select(Fulfillment).where(Fulfillment.order_id == order.id))
+    ).scalars().all()
+    fulfillments_out = [
+        MerchantOrderFulfillment(
+            id=str(f.id),
+            status=f.status,
+            type=f.type,
+            carrier=f.carrier,
+            tracking_number=f.tracking_number,
+            delivery_method=f.delivery_method,
+            delivered_at=f.delivered_at,
+        )
+        for f in ff_rows
+    ]
+
+    # Derive a merchant-facing payment status (mirrors OrderService.get_order).
+    payment_status = "paid" if order.status == OrderStatus.PAID.value else None
+
+    # Derive fulfillment status from related fulfillments (mirrors OrderService).
+    fulfillment_status = None
+    if ff_rows:
+        statuses = {f.status for f in ff_rows}
+        if all(s in (FulfillmentStatus.DELIVERED.value, FulfillmentStatus.DELIVERED_DIGITAL.value) for s in statuses):
+            fulfillment_status = "delivered"
+        elif any(s == FulfillmentStatus.SHIPPED.value for s in statuses):
+            fulfillment_status = "shipped"
+        elif any(s == FulfillmentStatus.PENDING.value for s in statuses):
+            fulfillment_status = "pending"
+        elif any(s == FulfillmentStatus.FAILED.value for s in statuses):
+            fulfillment_status = "failed"
+
+    return MerchantOrderDetail(
+        id=str(order.id),
+        order_number=order.order_number,
+        status=order.status,
+        currency=order.currency,
+        total_amount=order.total_amount,
+        item_count=sum(it.quantity for it in order_items),
+        created_at=order.created_at,
+        updated_at=order.updated_at,
+        payment_status=payment_status,
+        fulfillment_status=fulfillment_status,
+        fulfilled_at=order.fulfilled_at,
+        fulfillment_summary=order.fulfillment_summary,
+        idempotency_key=order.idempotency_key,
+        buyer=buyer,
+        items=items_out,
+        payment=payment,
+        fulfillments=fulfillments_out,
+    )
 
 
 @router.get(
