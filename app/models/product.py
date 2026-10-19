@@ -20,13 +20,13 @@ from sqlalchemy import (
 from sqlalchemy.sql import func
 
 
-class FulfillmentKind(PyEnum):
+class FulfillmentKind(str, PyEnum):
     PHYSICAL = "physical"
     DIGITAL = "digital"
     SERVICE = "service"
 
 
-class ProductStatus(PyEnum):
+class ProductStatus(str, PyEnum):
     DRAFT = "draft"
     ACTIVE = "active"
     SUSPENDED = "suspended"

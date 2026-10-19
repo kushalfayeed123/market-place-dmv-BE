@@ -12,7 +12,7 @@ from app.db.base import BaseModel
 from app.models.enums import DeliveryMethod, FulfillmentKindOrder, FulfillmentStatus
 
 
-class OrderStatus(PyEnum):
+class OrderStatus(str, PyEnum):
     PENDING = "pending"
     PAID = "paid"
     PARTIALLY_FULFILLED = "partially_fulfilled"

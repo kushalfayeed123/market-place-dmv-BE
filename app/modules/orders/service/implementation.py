@@ -6,13 +6,12 @@ Handles database operations for orders using SQLAlchemy.
 
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.security import to_uuid
-from app.models.enums import DeliveryMethod
+from app.models.fulfillment import Fulfillment, FulfillmentStatus
 from app.models.inventory import Inventory
 from app.models.ledger_entry import LedgerDirection, LedgerEntry, LedgerEntryType
-from app.models.fulfillment import Fulfillment
 from app.models.merchant import Merchant
 from app.models.notification import NotificationChannel, NotificationType
 from app.models.order import Order, OrderStatus
@@ -20,13 +19,12 @@ from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
-from app.modules.orders.service.base import OrderService
 from app.modules.notifications.service.base import NotificationService
+from app.modules.orders.service.base import OrderService
 from app.schemas.notification import NotificationCreate
 from app.schemas.orders import (
     CheckoutRequest,
     CheckoutResponse,
-    FulfillOrderRequest,
     FulfillOrderResponse,
     OrderApprovalResponse,
     OrderResponse,
@@ -43,7 +41,7 @@ def _generate_order_number() -> str:
     Format: ORD-YYYYMMDD-HHMMSS-XXXX where XXXX is 4 hex chars from a UUID.
     Example: ORD-20261005-143022-8a3f
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return f"ORD-{now.strftime('%Y%m%d')}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:4]}"
 
 
@@ -512,7 +510,12 @@ class OrderServiceImpl(OrderService):
         order_id: str,
         merchant_id: str,
     ) -> OrderApprovalResponse:
-        """Merchant approves an order with proof of payment on file."""
+        """Merchant confirms payment for an order, moving it to 'paid'.
+
+        Accepts an order in 'pending' (online payment awaiting webhook
+        confirmation) or 'awaiting_approval' (proof-of-payment on file); in
+        both cases the merchant is confirming payment has been received.
+        """
         result = await self._db.execute(
             select(Order).where(Order.id == to_uuid(order_id))
         )
@@ -531,7 +534,10 @@ class OrderServiceImpl(OrderService):
         if not merchant_items:
             raise ValueError("Not authorized to approve this order")
 
-        if order.status != OrderStatus.AWAITING_APPROVAL.value:
+        if order.status not in (
+            OrderStatus.PENDING.value,
+            OrderStatus.AWAITING_APPROVAL.value,
+        ):
             raise ValueError(
                 f"Order cannot be approved in status '{order.status}'"
             )
@@ -684,7 +690,7 @@ class OrderServiceImpl(OrderService):
             order.status = OrderStatus.FULFILLED.value
         else:
             order.status = OrderStatus.FULFILLED.value
-        order.fulfilled_at = datetime.now(timezone.utc)
+        order.fulfilled_at = datetime.now(UTC)
         if fulfillment_summary:
             order.fulfillment_summary = fulfillment_summary
 

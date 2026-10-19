@@ -22,7 +22,7 @@ from app.db.types import ENUM as PgEnum
 from app.db.types import UUID
 
 
-class KycStatus(PyEnum):
+class KycStatus(str, PyEnum):
     PENDING = "pending"
     TEST_MODE = "test_mode"
     VERIFIED = "verified"

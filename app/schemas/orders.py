@@ -67,7 +67,7 @@ class OrderResponse(BaseModel):
     items: list[dict]  # Order item details
 
 
-class DeliveryMethod(PyEnum):
+class DeliveryMethod(str, PyEnum):
     MERCHANT = "merchant"
     THIRD_PARTY = "third_party"
 

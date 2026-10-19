@@ -36,8 +36,15 @@ class LedgerEntryType(PyEnum):
 class LedgerEntry(BaseModel):
     __tablename__ = "ledger_entries"
 
-    # Intentional override: BigInteger auto-increment PK for ledger (not UUID from BaseModel)
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    # Intentional override: BigInt auto-increment PK for the ledger (not UUID
+    # from BaseModel). Use Integer on SQLite (the in-memory test DB) so the
+    # column is an INTEGER PRIMARY KEY and gets an auto-assigned rowid; on
+    # MySQL/PostgreSQL the BigInt key (64-bit) is preserved.
+    id = Column(
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     entry_group_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     account_type = Column(String(50), nullable=False)
     merchant_id = Column(UUID(as_uuid=True), ForeignKey("merchants.id"), nullable=True, index=True)

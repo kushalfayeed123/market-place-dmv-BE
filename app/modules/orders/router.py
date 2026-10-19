@@ -302,10 +302,11 @@ async def approve_order(
     notification_service: NotificationService = get_notification_service_depends,
     idempotency: dict = get_idempotency_depends,
 ):
-    """Merchant approves an order with proof of payment on file.
+    """Merchant confirms payment for an order (pending or awaiting_approval).
 
     Transitions the order to 'paid', creates the payout-release ledger entry,
-    and notifies the buyer.
+    and notifies the buyer. Accepts a 'pending' order (manual confirmation of
+    an online/bank payment) or an 'awaiting_approval' order (proof on file).
     """
     if current_user.role.value not in ("merchant_owner", "merchant_staff", "platform_admin"):
         raise HTTPException(

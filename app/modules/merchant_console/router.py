@@ -28,14 +28,9 @@ verify ownership; resource actions verify ownership via the resource's
 merchant FK.
 """
 
-import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
-
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_active_user, to_uuid
 from app.db.session import get_db
@@ -62,6 +57,9 @@ from app.schemas.merchant_console import (
     PayoutListItem,
 )
 from app.schemas.merchants import KycReviewRequest, PayoutCreate, PayoutResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 
@@ -110,7 +108,7 @@ async def get_merchant_attention(
 ):
     """Return counts of items needing the merchant's attention."""
     merchant = await _require_merchant_access(merchant_id, current_user, db)
-    mid = merchant.id
+    mid = to_uuid(merchant.id)
 
     orders_to_fulfil = await db.scalar(
         select(func.count())
@@ -192,7 +190,7 @@ async def get_payout_account_status(
     result = await db.execute(
         select(MerchantPayoutAccount)
         .where(
-            MerchantPayoutAccount.merchant_id == merchant.id,
+            MerchantPayoutAccount.merchant_id == to_uuid(merchant.id),
             MerchantPayoutAccount.is_active.is_(True),
         )
         .order_by(MerchantPayoutAccount.created_at.desc())
@@ -230,7 +228,7 @@ async def list_merchant_orders(
 ):
     """List orders that contain items for this merchant."""
     merchant = await _require_merchant_access(merchant_id, current_user, db)
-    mid = merchant.id
+    mid = to_uuid(merchant.id)
 
     q = (
         select(Order, OrderItem)
@@ -286,7 +284,7 @@ async def list_merchant_products(
 ):
     """List products for this merchant with first variant's SKU + stock."""
     merchant = await _require_merchant_access(merchant_id, current_user, db)
-    mid = merchant.id
+    mid = to_uuid(merchant.id)
 
     q = (
         select(Product)
@@ -358,7 +356,7 @@ async def list_merchant_shipments(
 ):
     """List fulfillments (shipments) for this merchant."""
     merchant = await _require_merchant_access(merchant_id, current_user, db)
-    mid = merchant.id
+    mid = to_uuid(merchant.id)
 
     q = (
         select(Fulfillment)
@@ -446,7 +444,7 @@ async def list_merchant_disputes(
 ):
     """List disputes for this merchant."""
     merchant = await _require_merchant_access(merchant_id, current_user, db)
-    mid = merchant.id
+    mid = to_uuid(merchant.id)
 
     q = (
         select(Dispute)
@@ -486,7 +484,7 @@ async def list_merchant_conversations(
 ):
     """List conversations for this merchant."""
     merchant = await _require_merchant_access(merchant_id, current_user, db)
-    mid = merchant.id
+    mid = to_uuid(merchant.id)
 
     q = (
         select(Conversation)
@@ -523,7 +521,7 @@ async def _check_order_ownership(
     """Return True if current_user owns a merchant that has items in this order."""
     if current_user.role == UserRole.PLATFORM_ADMIN:
         return True
-    subquery = select(Merchant.id).where(Merchant.owner_user_id == current_user.id)
+    subquery = select(Merchant.id).where(Merchant.owner_user_id == to_uuid(current_user.id))
     result = await db.scalar(
         select(func.count())
         .select_from(OrderItem)
@@ -579,13 +577,22 @@ async def cancel_order(
     current_user: User = get_current_active_user_depends,
     db: AsyncSession = get_db_depends,
 ):
-    """Cancel an order — transitions to cancelled."""
+    """Cancel an order — transitions to cancelled.
+
+    Accepts 'pending' (unpaid cancel — no refund), 'paid', or
+    'partially_fulfilled'. A pending order has no captured funds, so this is a
+    plain cancel with no refund.
+    """
     if not await _check_order_ownership(order_id, current_user, db):
         raise HTTPException(status_code=403, detail="Not authorized to manage this order")
     order = await db.get(Order, to_uuid(order_id))
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    if order.status not in (OrderStatus.PAID.value, OrderStatus.PARTIALLY_FULFILLED.value):
+    if order.status not in (
+        OrderStatus.PENDING.value,
+        OrderStatus.PAID.value,
+        OrderStatus.PARTIALLY_FULFILLED.value,
+    ):
         raise HTTPException(status_code=400, detail=f"Order cannot be cancelled from status '{order.status}'")
     order.status = OrderStatus.CANCELLED.value
     await db.commit()
@@ -600,7 +607,7 @@ async def _get_owned_merchant_ids(current_user: User, db: AsyncSession) -> list:
     if current_user.role == UserRole.PLATFORM_ADMIN:
         return [r for r in (await db.scalars(select(Merchant.id))).all()]
     return [r for r in (await db.scalars(
-        select(Merchant.id).where(Merchant.owner_user_id == current_user.id)
+        select(Merchant.id).where(Merchant.owner_user_id == to_uuid(current_user.id))
     )).all()]
 
 
@@ -706,7 +713,7 @@ async def mark_delivered(
         raise HTTPException(status_code=400, detail=f"Cannot mark delivered from status '{fulfillment.status}'")
     from app.models.enums import FulfillmentStatus as FS
     fulfillment.status = FS.DELIVERED.value
-    fulfillment.delivered_at = datetime.now(tz=timezone.utc)
+    fulfillment.delivered_at = datetime.now(tz=UTC)
     await db.commit()
     await db.refresh(fulfillment)
     return {"ok": True, "shipment_id": shipment_id, "status": fulfillment.status}
@@ -755,7 +762,7 @@ async def create_payout_request(
     from app.models.merchant_payout_account import MerchantPayoutAccount
     result = await db.execute(
         select(MerchantPayoutAccount).where(
-            MerchantPayoutAccount.merchant_id == merchant.id,
+            MerchantPayoutAccount.merchant_id == to_uuid(merchant.id),
             MerchantPayoutAccount.is_active.is_(True),
         )
     )
@@ -768,7 +775,7 @@ async def create_payout_request(
 
     reference = f"pout_{uuid4().hex[:12]}"
     new_payout = Payout(
-        merchant_id=merchant.id,
+        merchant_id=to_uuid(merchant.id),
         amount=payout_data.amount,
         currency=payout_data.currency,
         status="requested",

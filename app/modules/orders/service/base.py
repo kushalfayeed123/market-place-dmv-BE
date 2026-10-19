@@ -117,10 +117,12 @@ class OrderService(ABC):
         merchant_id: str,
     ) -> OrderApprovalResponse:
         """
-        Merchant approves an order that has proof of payment on file.
+        Merchant confirms payment for an order, moving it to 'paid'.
 
-        Transitions the order to 'paid', creates the payout-release ledger
-        entry, and notifies the buyer.
+        Accepts an order in 'pending' (online payment awaiting webhook
+        confirmation) or 'awaiting_approval' (proof-of-payment on file); in
+        both cases the merchant is confirming payment has been received.
+        Creates the payout-release ledger entry and notifies the buyer.
 
         Args:
             order_id: The order ID.
@@ -131,7 +133,7 @@ class OrderService(ABC):
 
         Raises:
             ValueError: If the order is not found, not owned by the merchant,
-                        or not in 'awaiting_approval' status.
+                        or not in 'pending' or 'awaiting_approval' status.
         """
         ...
 

@@ -22,20 +22,20 @@ from app.db.base import BaseModel
 from app.db.types import CITEXT
 
 
-class UserRole(PyEnum):
+class UserRole(str, PyEnum):
     BUYER = "buyer"
     MERCHANT_OWNER = "merchant_owner"
     MERCHANT_STAFF = "merchant_staff"
     PLATFORM_ADMIN = "platform_admin"
 
 
-class UserStatus(PyEnum):
+class UserStatus(str, PyEnum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
     DELETED = "deleted"
 
 
-class Gender(PyEnum):
+class Gender(str, PyEnum):
     """Gender identity options for user profiles."""
 
     MALE = "male"

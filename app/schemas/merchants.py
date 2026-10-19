@@ -9,7 +9,7 @@ from enum import Enum as PyEnum
 from pydantic import BaseModel, Field
 
 
-class KycStatus(PyEnum):
+class KycStatus(str, PyEnum):
     PENDING = "pending"
     TEST_MODE = "test_mode"
     VERIFIED = "verified"

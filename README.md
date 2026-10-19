@@ -274,6 +274,10 @@ See the automatically generated API documentation at `/docs` or `/redoc` for com
 - `POST /api/v1/orders/checkout` - Create order (requires idempotency key)
 - `GET /api/v1/orders/{order_id}` - Get order details
 - `GET /api/v1/orders/` - List user's orders
+- `POST /api/v1/orders/{order_id}/approve` - Confirm payment (merchant; `pending`|`awaiting_approval` → `paid`)
+- `POST /api/v1/orders/{order_id}/accept` - Accept order (merchant; `paid` → `partially_fulfilled`)
+- `POST /api/v1/orders/{order_id}/ship` - Mark shipped (merchant; `paid`|`partially_fulfilled` → `fulfilled`)
+- `POST /api/v1/orders/{order_id}/cancel` - Cancel order (merchant; `pending`|`paid`|`partially_fulfilled` → `cancelled`)
 
 ### Payments
 - `POST /api/v1/payments/process` - Process payment (requires idempotency key)

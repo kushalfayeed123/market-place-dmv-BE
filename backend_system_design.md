@@ -225,7 +225,7 @@ CREATE TABLE digital_assets (
 
 -- ============ ORDERS & FULFILLMENT ============
 
-CREATE TYPE order_status AS ENUM ('pending', 'paid', 'partially_fulfilled', 'fulfilled', 'cancelled', 'refunded');
+CREATE TYPE order_status AS ENUM ('pending', 'awaiting_approval', 'paid', 'partially_fulfilled', 'fulfilled', 'cancelled', 'refunded');
 CREATE TYPE fulfillment_kind_order AS ENUM ('shipment', 'digital_delivery');
 CREATE TYPE fulfillment_status AS ENUM ('pending', 'shipped', 'delivered', 'delivered_digital', 'failed');
 
@@ -667,6 +667,10 @@ Render auto-deploys on push to `main` once CI is green — no separate CD toolin
 | POST | `/merchants/{id}/products` | merchant_owner (ownership) | |
 | GET | `/catalog/products` | none | public browse |
 | POST | `/orders/checkout` | buyer | **requires Idempotency-Key** |
+| POST | `/orders/{id}/approve` | merchant_owner | pending\|awaiting_approval → paid; releases payout hold |
+| POST | `/orders/{id}/accept` | merchant_owner | paid → partially_fulfilled |
+| POST | `/orders/{id}/ship` | merchant_owner | paid\|partially_fulfilled → fulfilled |
+| POST | `/orders/{id}/cancel` | merchant_owner | pending\|paid\|partially_fulfilled → cancelled |
 | POST | `/webhooks/paystack` | signature | idempotent by event id |
 | POST | `/payments/{id}/refund` | platform_admin | **requires Idempotency-Key** |
 | GET | `/merchants/{id}/ledger` | merchant_owner (ownership) | read-only, derived balance view |

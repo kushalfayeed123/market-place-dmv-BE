@@ -11,9 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import to_uuid
-from app.models.enums import NotificationType
 from app.models.fulfillment import Fulfillment, FulfillmentStatus
-from app.models.notification import NotificationChannel
+from app.models.notification import NotificationChannel, NotificationType
 from app.models.order import Order, OrderStatus
 from app.modules.fulfillment.service.base import FulfillmentService
 from app.modules.notifications.service.base import NotificationService
