@@ -4,6 +4,7 @@ Main FastAPI application entry point.
 Initializes the app, registers middleware, and includes routers.
 """
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ from app.core.security import setup_security
 from app.modules.auth.router import router as auth_router
 from app.modules.catalog.router import router as catalog_router
 from app.modules.commissions.router import router as commissions_router
+from app.modules.documents.router import router as documents_router
 from app.modules.fulfillment.router import router as fulfillment_router
 from app.modules.knowledge.router import router as knowledge_router
 from app.modules.ledger.router import router as ledger_router
@@ -65,6 +67,7 @@ redis_init_func = init_redis
 # Include routers
 app.include_router(auth_router, prefix=f"{settings.API_V1_STR}/auth", tags=["auth"])
 app.include_router(catalog_router, prefix=f"{settings.API_V1_STR}/catalog", tags=["catalog"])
+app.include_router(documents_router, prefix=f"{settings.API_V1_STR}/documents", tags=["documents"])
 app.include_router(commissions_router, prefix=f"{settings.API_V1_STR}/commissions", tags=["commissions"])
 app.include_router(merchants_router, prefix=f"{settings.API_V1_STR}/merchants", tags=["merchants"])
 app.include_router(stores_router, prefix=f"{settings.API_V1_STR}/stores", tags=["stores"])
@@ -93,8 +96,18 @@ setup_security(app)
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize Redis connection on startup."""
+    """Initialize Redis connection and validate S3 bucket on startup."""
     await init_redis(settings.REDIS_URL)
+    # Validate S3 bucket is reachable (logs warning if not, but doesn't crash)
+    try:
+        import asyncio as _asyncio
+        from app.core.storage import key_exists
+
+        await _asyncio.to_thread(key_exists, bucket=settings.S3_BUCKET, key=".health-check")
+    except Exception as exc:  # noqa: BLE001
+        from app.core.logging import setup_logging
+        logger = logging.getLogger(__name__)
+        logger.warning("S3 bucket check failed on startup: %s", exc)
 
 
 @app.get("/")

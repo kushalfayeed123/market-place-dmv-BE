@@ -9,6 +9,7 @@ from app.models.category import Category  # noqa: F401
 from app.models.commission_plan import CommissionPlan  # noqa: F401
 from app.models.conversation import Conversation  # noqa: F401
 from app.models.digital_asset import DigitalAsset  # noqa: F401
+from app.models.document import Document  # noqa: F401
 from app.models.fulfillment import Fulfillment  # noqa: F401
 from app.models.idempotency_key import IdempotencyKey  # noqa: F401
 from app.models.inventory import Inventory  # noqa: F401

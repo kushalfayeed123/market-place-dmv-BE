@@ -93,6 +93,18 @@ class Settings(BaseSettings):
     R2_ACCESS_KEY_ID: str = Field(..., env="R2_ACCESS_KEY_ID")
     R2_SECRET_ACCESS_KEY: str = Field(..., env="R2_SECRET_ACCESS_KEY")
 
+    # ── AWS S3 (document storage) ──────────────────────────────────────────
+    # S3 is the primary backend for the `documents` subsystem.  Local dev and
+    # testing use moto (mock_aws) so these still need to resolve from env.
+    AWS_REGION: str = Field("us-east-1", env="AWS_REGION")
+    S3_BUCKET: str = Field(..., env="S3_BUCKET")
+    S3_UPLOAD_URL_TTL_SECONDS: int = Field(3600, env="S3_UPLOAD_URL_TTL_SECONDS")
+    S3_DOWNLOAD_URL_TTL_SECONDS: int = Field(300, env="S3_DOWNLOAD_URL_TTL_SECONDS")
+    S3_MAX_UPLOAD_MB: int = Field(10, env="S3_MAX_UPLOAD_MB")
+    # Base URL used to serve public documents (e.g. CloudFront distribution).
+    # When empty, presigned download URLs are returned instead.
+    S3_PUBLIC_BASE_URL: str = Field("", env="S3_PUBLIC_BASE_URL")
+
     # Feature Flags
     KYC_ENFORCEMENT_ENABLED: bool = Field(False, env="KYC_ENFORCEMENT_ENABLED")
 

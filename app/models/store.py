@@ -18,6 +18,14 @@ class Store(BaseModel):
     name = Column(String(255), nullable=False)
     slug = Column(String(255), nullable=False, unique=True)
     branding = Column(Text, nullable=False, server_default=text("('{}')"))  # JSONB equivalent
+    logo_document_id = Column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    banner_document_id = Column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     
     # Indexes
     __table_args__ = (

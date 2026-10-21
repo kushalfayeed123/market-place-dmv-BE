@@ -37,6 +37,10 @@ class Merchant(BaseModel):
     slug = Column(String(255), nullable=False, unique=True)
     kyc_status = Column(PgEnum(KycStatus), nullable=False, default=KycStatus.PENDING)
     kyc_provider_ref = Column(Text)  # Reference ID from identity API
+    kyc_document_id = Column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     commission_plan_id = Column(UUID(as_uuid=True), ForeignKey("commission_plans.id"), nullable=False)
 
     # Merchant address fields (nullable for backward compatibility)
