@@ -3,7 +3,7 @@
 Order model representing customer purchases.
 """
 
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Index, UniqueConstraint, CheckConstraint, text
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Index, UniqueConstraint, CheckConstraint, text, JSON
 from app.db.types import UUID, BIGINT, CHAR
 from sqlalchemy.sql import func
 from enum import Enum as PyEnum
@@ -32,6 +32,8 @@ class Order(BaseModel):
     status = Column(String(50), nullable=False, default=OrderStatus.PENDING.value)
     currency = Column(CHAR(3), nullable=False)
     total_amount = Column(BIGINT, nullable=False)  # Minor units
+    # Optional delivery/shipping address captured at checkout (JSON blob).
+    delivery_address = Column(JSON, nullable=True)
     # VARCHAR(255): unique column, MySQL cannot index TEXT without a prefix length
     idempotency_key = Column(String(255), nullable=True, unique=True)
     # Timestamp when the order reached a fully fulfilled state.

@@ -28,18 +28,28 @@ verify ownership; resource actions verify ownership via the resource's
 merchant FK.
 """
 
-from datetime import UTC, datetime
 import json
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_active_user, to_uuid
 from app.db.session import get_db
 from app.models.conversation import Conversation
 from app.models.dispute import Dispute
+from app.models.enums import (
+    DeliveryMethod,
+    FulfillmentKindOrder,
+    FulfillmentStatus,
+    InventoryPolicy,
+)
 from app.models.fulfillment import Fulfillment
-from app.models.enums import FulfillmentStatus
 from app.models.inventory import Inventory
+from app.models.ledger_entry import LedgerDirection, LedgerEntry, LedgerEntryType
 from app.models.merchant import Merchant
 from app.models.merchant_payout_account import MerchantPayoutAccount
 from app.models.order import Order, OrderStatus
@@ -54,10 +64,10 @@ from app.schemas.merchant_console import (
     ConversationListItem,
     DisputeListItem,
     MerchantOrderBuyer,
-    MerchantOrderItemDetail,
-    MerchantOrderFulfillment,
-    MerchantOrderListItem,
     MerchantOrderDetail,
+    MerchantOrderFulfillment,
+    MerchantOrderItemDetail,
+    MerchantOrderListItem,
     MerchantOrderPayment,
     MerchantProductListItem,
     MerchantShipmentListItem,
@@ -65,9 +75,6 @@ from app.schemas.merchant_console import (
     PayoutListItem,
 )
 from app.schemas.merchants import KycReviewRequest, PayoutCreate, PayoutResponse
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 
@@ -75,7 +82,6 @@ router = APIRouter()
 
 get_current_active_user_depends = Depends(get_current_active_user)
 get_db_depends = Depends(get_db)
-
 
 
 # ── Authorization helpers ────────────────────────────────────────────────
@@ -105,6 +111,7 @@ async def _require_merchant_access(
 
 # ── Attention / overview ──────────────────────────────────────────────────
 
+
 @router.get(
     "/merchants/{merchant_id}/attention",
     response_model=AttentionResponse,
@@ -123,10 +130,14 @@ async def get_merchant_attention(
         .select_from(Order)
         .join(OrderItem, OrderItem.order_id == Order.id)
         .where(OrderItem.merchant_id == mid)
-        .where(Order.status.in_([
-            OrderStatus.PAID.value,
-            OrderStatus.PARTIALLY_FULFILLED.value,
-        ]))
+        .where(
+            Order.status.in_(
+                [
+                    OrderStatus.PAID.value,
+                    OrderStatus.PARTIALLY_FULFILLED.value,
+                ]
+            )
+        )
     )
 
     disputes_due = await db.scalar(
@@ -163,8 +174,9 @@ async def get_merchant_attention(
             select(func.coalesce(func.sum(Inventory.quantity_available), 0))
             .where(
                 Inventory.variant_id.in_(
-                    select(ProductVariant.id)
-                    .where(ProductVariant.product_id == Product.id)
+                    select(ProductVariant.id).where(
+                        ProductVariant.product_id == Product.id
+                    )
                 )
             )
             .scalar_subquery()
@@ -222,6 +234,7 @@ async def get_payout_account_status(
 
 # ── Merchant-scoped list endpoints ──────────────────────────────────────
 
+
 @router.get(
     "/merchants/{merchant_id}/orders",
     response_model=list[MerchantOrderListItem],
@@ -255,8 +268,9 @@ async def list_merchant_orders(
     user_map: dict[str, str] = {}
     if buyer_ids:
         users = await db.execute(
-            select(User.id, User.first_name, User.last_name, User.email)
-            .where(User.id.in_(buyer_ids))
+            select(User.id, User.first_name, User.last_name, User.email).where(
+                User.id.in_(buyer_ids)
+            )
         )
         for u in users:
             name = f"{u.first_name or ''} {u.last_name or ''}".strip()
@@ -330,11 +344,15 @@ async def get_merchant_order_detail(
     vids = [it.variant_id for it in order_items if it.variant_id]
     products = (
         (await db.execute(select(Product).where(Product.id.in_(pids)))).scalars().all()
-        if pids else []
+        if pids
+        else []
     )
     variants = (
-        (await db.execute(select(ProductVariant).where(ProductVariant.id.in_(vids)))).scalars().all()
-        if vids else []
+        (await db.execute(select(ProductVariant).where(ProductVariant.id.in_(vids))))
+        .scalars()
+        .all()
+        if vids
+        else []
     )
     prod_map = {str(p.id): p for p in products}
     variant_map = {str(v.id): v for v in variants}
@@ -350,18 +368,20 @@ async def get_merchant_order_detail(
             except (ValueError, TypeError):
                 image_url = None
         v = variant_map.get(str(it.variant_id)) if it.variant_id else None
-        items_out.append(MerchantOrderItemDetail(
-            id=str(it.id),
-            product_id=str(it.product_id),
-            product_title=p.title if p else "—",
-            variant_id=str(it.variant_id) if it.variant_id else None,
-            variant_sku=v.sku if v else None,
-            image_url=image_url,
-            quantity=it.quantity,
-            unit_price=it.unit_price,
-            currency=it.currency,
-            line_total=it.line_total,
-        ))
+        items_out.append(
+            MerchantOrderItemDetail(
+                id=str(it.id),
+                product_id=str(it.product_id),
+                product_title=p.title if p else "—",
+                variant_id=str(it.variant_id) if it.variant_id else None,
+                variant_sku=v.sku if v else None,
+                image_url=image_url,
+                quantity=it.quantity,
+                unit_price=it.unit_price,
+                currency=it.currency,
+                line_total=it.line_total,
+            )
+        )
 
     # Buyer details.
     buyer_obj = await db.get(User, order.buyer_id)
@@ -400,8 +420,10 @@ async def get_merchant_order_detail(
 
     # Fulfillments.
     ff_rows = (
-        await db.execute(select(Fulfillment).where(Fulfillment.order_id == order.id))
-    ).scalars().all()
+        (await db.execute(select(Fulfillment).where(Fulfillment.order_id == order.id)))
+        .scalars()
+        .all()
+    )
     fulfillments_out = [
         MerchantOrderFulfillment(
             id=str(f.id),
@@ -422,7 +444,14 @@ async def get_merchant_order_detail(
     fulfillment_status = None
     if ff_rows:
         statuses = {f.status for f in ff_rows}
-        if all(s in (FulfillmentStatus.DELIVERED.value, FulfillmentStatus.DELIVERED_DIGITAL.value) for s in statuses):
+        if all(
+            s
+            in (
+                FulfillmentStatus.DELIVERED.value,
+                FulfillmentStatus.DELIVERED_DIGITAL.value,
+            )
+            for s in statuses
+        ):
             fulfillment_status = "delivered"
         elif any(s == FulfillmentStatus.SHIPPED.value for s in statuses):
             fulfillment_status = "shipped"
@@ -444,6 +473,7 @@ async def get_merchant_order_detail(
         fulfillment_status=fulfillment_status,
         fulfilled_at=order.fulfilled_at,
         fulfillment_summary=order.fulfillment_summary,
+        delivery_address=order.delivery_address,
         idempotency_key=order.idempotency_key,
         buyer=buyer,
         items=items_out,
@@ -485,12 +515,16 @@ async def list_merchant_products(
 
     pids = [p.id for p in products]
     variants = (
-        await db.execute(
-            select(ProductVariant)
-            .where(ProductVariant.product_id.in_(pids))
-            .order_by(ProductVariant.product_id, ProductVariant.created_at)
+        (
+            await db.execute(
+                select(ProductVariant)
+                .where(ProductVariant.product_id.in_(pids))
+                .order_by(ProductVariant.product_id, ProductVariant.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     first_variant: dict[str, ProductVariant] = {}
     for v in variants:
@@ -499,7 +533,10 @@ async def list_merchant_products(
             first_variant[pid] = v
 
     inv_res = await db.execute(
-        select(Inventory.variant_id, func.coalesce(func.sum(Inventory.quantity_available), 0).label("qty"))
+        select(
+            Inventory.variant_id,
+            func.coalesce(func.sum(Inventory.quantity_available), 0).label("qty"),
+        )
         .where(Inventory.variant_id.in_([v.id for v in variants]))
         .group_by(Inventory.variant_id)
     )
@@ -509,18 +546,24 @@ async def list_merchant_products(
         MerchantProductListItem(
             id=str(p.id),
             title=p.title,
-            sku=first_variant.get(str(p.id), ProductVariant(sku="")).sku if str(p.id) in first_variant else "",
+            sku=first_variant.get(str(p.id), ProductVariant(sku="")).sku
+            if str(p.id) in first_variant
+            else "",
             stock=int(
                 inv_map.get(
-                    str(first_variant[str(p.id)].id) if str(p.id) in first_variant else "missing",
+                    str(first_variant[str(p.id)].id)
+                    if str(p.id) in first_variant
+                    else "missing",
                     0,
                 )
-            ) if str(p.id) in first_variant else 0,
+            )
+            if str(p.id) in first_variant
+            else 0,
             price=p.base_price_amount,
             currency=p.base_price_currency,
             status=p.status,
         )
-                for p in products
+        for p in products
     ]
 
 
@@ -602,7 +645,9 @@ async def list_merchant_payouts(
         PayoutListItem(
             id=str(p.id),
             reference=p.reference,
-            bank_account=f"•••• {p.bank_account_last4}" if p.bank_account_last4 else p.bank_name,
+            bank_account=f"•••• {p.bank_account_last4}"
+            if p.bank_account_last4
+            else p.bank_name,
             created_at=p.created_at,
             amount=p.amount,
             currency=p.currency,
@@ -691,11 +736,12 @@ async def list_merchant_conversations(
             updated_at=c.updated_at,
             status=c.status,
         )
-                for c in conversations
+        for c in conversations
     ]
 
 
 # ── Order actions ────────────────────────────────────────────────────────
+
 
 async def _check_order_ownership(
     order_id: str, current_user: User, db: AsyncSession
@@ -703,7 +749,9 @@ async def _check_order_ownership(
     """Return True if current_user owns a merchant that has items in this order."""
     if current_user.role == UserRole.PLATFORM_ADMIN:
         return True
-    subquery = select(Merchant.id).where(Merchant.owner_user_id == to_uuid(current_user.id))
+    subquery = select(Merchant.id).where(
+        Merchant.owner_user_id == to_uuid(current_user.id)
+    )
     result = await db.scalar(
         select(func.count())
         .select_from(OrderItem)
@@ -721,12 +769,17 @@ async def accept_order(
 ):
     """Accept an order — transitions paid → partially_fulfilled."""
     if not await _check_order_ownership(order_id, current_user, db):
-        raise HTTPException(status_code=403, detail="Not authorized to manage this order")
+        raise HTTPException(
+            status_code=403, detail="Not authorized to manage this order"
+        )
     order = await db.get(Order, to_uuid(order_id))
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     if order.status != OrderStatus.PAID.value:
-        raise HTTPException(status_code=400, detail=f"Order cannot be accepted from status '{order.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Order cannot be accepted from status '{order.status}'",
+        )
     order.status = OrderStatus.PARTIALLY_FULFILLED.value
     await db.commit()
     await db.refresh(order)
@@ -741,13 +794,138 @@ async def ship_order(
 ):
     """Mark an order as shipped — transitions to fulfilled."""
     if not await _check_order_ownership(order_id, current_user, db):
-        raise HTTPException(status_code=403, detail="Not authorized to manage this order")
+        raise HTTPException(
+            status_code=403, detail="Not authorized to manage this order"
+        )
     order = await db.get(Order, to_uuid(order_id))
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    if order.status not in (OrderStatus.PARTIALLY_FULFILLED.value, OrderStatus.PAID.value):
-        raise HTTPException(status_code=400, detail=f"Order cannot be shipped from status '{order.status}'")
+    if order.status not in (
+        OrderStatus.PARTIALLY_FULFILLED.value,
+        OrderStatus.PAID.value,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Order cannot be shipped from status '{order.status}'",
+        )
+    # Resolve which merchant(s) in this order the acting user represents so the
+    # delivery and payout-release are recorded against the correct wallet(s).
+    order_merchants = (
+        (
+            await db.execute(
+                select(OrderItem.merchant_id).where(OrderItem.order_id == order.id)
+            )
+        )
+        .scalars()
+        .unique()
+        .all()
+    )
+    owned = await _get_owned_merchant_ids(current_user, db)
+    target_merchants = [m for m in order_merchants if m in owned]
+
+    for merchant_id in target_merchants:
+        items_result = await db.execute(
+            select(OrderItem).where(
+                OrderItem.order_id == order.id,
+                OrderItem.merchant_id == merchant_id,
+            )
+        )
+        merchant_items = items_result.scalars().all()
+        if not merchant_items:
+            continue
+
+        net_total = sum(abs(i.line_total) for i in merchant_items)
+        currency = merchant_items[0].currency
+
+        # 1) Persist a DELIVERED fulfillment so the order detail page's
+        #    delivery (fulfillments) section is populated for the merchant.
+        db.add(
+            Fulfillment(
+                order_id=order.id,
+                merchant_id=merchant_id,
+                type=FulfillmentKindOrder.SHIPMENT.value,
+                delivery_method=DeliveryMethod.THIRD_PARTY.value,
+                status=FulfillmentStatus.DELIVERED.value,
+                delivered_at=datetime.now(tz=UTC),
+            )
+        )
+
+        # 2) Release the merchant's held payout funds on delivery -- the
+        #    group-g2 `payout_release` ledger entry (design: "on delivery
+        #    confirmation a new balanced pair is posted"). When a `payout_hold`
+        #    exists (pay-on-delivery / proof-of-payment flow) the release supersedes
+        #    it; otherwise it posts a standalone credit, mirroring `approve_order`.
+        supersedes = None
+        hold = (
+            await db.execute(
+                select(LedgerEntry)
+                .where(
+                    LedgerEntry.order_id == order.id,
+                    LedgerEntry.merchant_id == merchant_id,
+                    LedgerEntry.entry_type == LedgerEntryType.PAYOUT_HOLD.value,
+                )
+                .order_by(LedgerEntry.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if hold:
+            supersedes = hold.id
+
+        db.add(
+            LedgerEntry(
+                entry_group_id=uuid4(),
+                account_type="merchant_wallet",
+                merchant_id=merchant_id,
+                direction=LedgerDirection.CREDIT.value,
+                entry_type=LedgerEntryType.PAYOUT_RELEASE.value,
+                amount=abs(net_total),
+                currency=currency,
+                order_id=order.id,
+                supersedes_entry_id=supersedes,
+                created_by=str(current_user.id),
+            )
+        )
+
+        # 3) Finalize the sale in inventory. Checkout already hard-reserved
+        #    tracked stock (app.modules.orders.service: `quantity_available`
+        #    decremented, `quantity_reserved` incremented at order creation).
+        #    On fulfillment the sold units leave the warehouse, so the pending
+        #    reservation is consumed here. We deliberately do NOT re-decrement
+        #    `quantity_available` -- checkout already removed the sold units
+        #    from it, re-decrementing would double-count the sale and can
+        #    violate the `ck_inventory_non_negative` CHECK constraint.
+        #    Untracked/unlimited variants and variants with no inventory row are
+        #    no-ops, mirroring the checkout reservation guard.
+        variant_ids = [i.variant_id for i in merchant_items if i.variant_id]
+        if variant_ids:
+            variants_res = await db.execute(
+                select(ProductVariant).where(ProductVariant.id.in_(variant_ids))
+            )
+            inv_res = await db.execute(
+                select(Inventory).where(Inventory.variant_id.in_(variant_ids))
+            )
+            policies = {v.id: v.inventory_policy for v in variants_res.scalars().all()}
+            inventories = {inv.variant_id: inv for inv in inv_res.scalars().all()}
+            shipped_by_variant = {}
+            for item in merchant_items:
+                if not item.variant_id:
+                    continue
+                shipped_by_variant[item.variant_id] = (
+                    shipped_by_variant.get(item.variant_id, 0) + item.quantity
+                )
+            for variant_id, shipped_qty in shipped_by_variant.items():
+                if policies.get(variant_id) != InventoryPolicy.TRACKED.value:
+                    continue
+                inventory = inventories.get(variant_id)
+                if not inventory:
+                    continue
+                # Consume the checkout reservation (clamped to stay >= 0).
+                release = min(shipped_qty, inventory.quantity_reserved)
+                if release:
+                    inventory.quantity_reserved -= release
+
     order.status = OrderStatus.FULFILLED.value
+    order.fulfilled_at = datetime.now(tz=UTC)
     await db.commit()
     await db.refresh(order)
     return {"ok": True, "order_id": order_id, "status": order.status}
@@ -766,7 +944,9 @@ async def cancel_order(
     plain cancel with no refund.
     """
     if not await _check_order_ownership(order_id, current_user, db):
-        raise HTTPException(status_code=403, detail="Not authorized to manage this order")
+        raise HTTPException(
+            status_code=403, detail="Not authorized to manage this order"
+        )
     order = await db.get(Order, to_uuid(order_id))
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -775,7 +955,10 @@ async def cancel_order(
         OrderStatus.PAID.value,
         OrderStatus.PARTIALLY_FULFILLED.value,
     ):
-        raise HTTPException(status_code=400, detail=f"Order cannot be cancelled from status '{order.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Order cannot be cancelled from status '{order.status}'",
+        )
     order.status = OrderStatus.CANCELLED.value
     await db.commit()
     await db.refresh(order)
@@ -784,16 +967,25 @@ async def cancel_order(
 
 # ── Product actions ──────────────────────────────────────────────────────
 
+
 async def _get_owned_merchant_ids(current_user: User, db: AsyncSession) -> list:
     """Return all merchant IDs owned by the current user (or all for admin)."""
     if current_user.role == UserRole.PLATFORM_ADMIN:
         return [r for r in (await db.scalars(select(Merchant.id))).all()]
-    return [r for r in (await db.scalars(
-        select(Merchant.id).where(Merchant.owner_user_id == to_uuid(current_user.id))
-    )).all()]
+    return [
+        r
+        for r in (
+            await db.scalars(
+                select(Merchant.id).where(
+                    Merchant.owner_user_id == to_uuid(current_user.id)
+                )
+            )
+        ).all()
+    ]
 
 
 # ── Product actions ──────────────────────────────────────────────────────
+
 
 @router.post("/products/{product_id}/publish")
 async def publish_product(
@@ -809,7 +1001,10 @@ async def publish_product(
     if product.merchant_id not in owned:
         raise HTTPException(status_code=403, detail="Not authorized")
     if product.status != ProductStatus.DRAFT.value:
-        raise HTTPException(status_code=400, detail=f"Product cannot be published from status '{product.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Product cannot be published from status '{product.status}'",
+        )
     product.status = ProductStatus.ACTIVE.value
     await db.commit()
     await db.refresh(product)
@@ -830,7 +1025,10 @@ async def unpublish_product(
     if product.merchant_id not in owned:
         raise HTTPException(status_code=403, detail="Not authorized")
     if product.status != ProductStatus.ACTIVE.value:
-        raise HTTPException(status_code=400, detail=f"Product cannot be unpublished from status '{product.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Product cannot be unpublished from status '{product.status}'",
+        )
     product.status = ProductStatus.DRAFT.value
     await db.commit()
     await db.refresh(product)
@@ -857,6 +1055,7 @@ async def delete_product(
 
 # ── Shipment (fulfillment) actions ──────────────────────────────────────
 
+
 @router.post("/shipments/{shipment_id}/pickup")
 async def request_pickup(
     shipment_id: str,
@@ -871,7 +1070,10 @@ async def request_pickup(
     if fulfillment.merchant_id not in owned:
         raise HTTPException(status_code=403, detail="Not authorized")
     if fulfillment.status != "pending":
-        raise HTTPException(status_code=400, detail=f"Cannot request pickup from status '{fulfillment.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot request pickup from status '{fulfillment.status}'",
+        )
     fulfillment.status = "shipped"
     await db.commit()
     await db.refresh(fulfillment)
@@ -892,8 +1094,12 @@ async def mark_delivered(
     if fulfillment.merchant_id not in owned:
         raise HTTPException(status_code=403, detail="Not authorized")
     if fulfillment.status not in ("pending", "shipped"):
-        raise HTTPException(status_code=400, detail=f"Cannot mark delivered from status '{fulfillment.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot mark delivered from status '{fulfillment.status}'",
+        )
     from app.models.enums import FulfillmentStatus as FS
+
     fulfillment.status = FS.DELIVERED.value
     fulfillment.delivered_at = datetime.now(tz=UTC)
     await db.commit()
@@ -902,6 +1108,7 @@ async def mark_delivered(
 
 
 # ── Payout actions ───────────────────────────────────────────────────────
+
 
 @router.post("/payouts/{payout_id}/cancel")
 async def cancel_payout(
@@ -917,7 +1124,10 @@ async def cancel_payout(
     if payout.merchant_id not in owned:
         raise HTTPException(status_code=403, detail="Not authorized")
     if payout.status != "requested":
-        raise HTTPException(status_code=400, detail=f"Cannot cancel payout from status '{payout.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel payout from status '{payout.status}'",
+        )
     payout.status = "cancelled"
     await db.commit()
     await db.refresh(payout)
@@ -925,6 +1135,7 @@ async def cancel_payout(
 
 
 # ── Payout requests ──────────────────────────────────────────────────────
+
 
 @router.post(
     "/merchants/{merchant_id}/payouts",
@@ -942,6 +1153,7 @@ async def create_payout_request(
 
     # Must have an active payout account
     from app.models.merchant_payout_account import MerchantPayoutAccount
+
     result = await db.execute(
         select(MerchantPayoutAccount).where(
             MerchantPayoutAccount.merchant_id == to_uuid(merchant.id),
@@ -988,6 +1200,7 @@ async def create_payout_request(
 
 # ── Admin KYC review ────────────────────────────────────────────────────
 
+
 @router.patch(
     "/admin/merchants/{merchant_id}/kyc",
     response_model=dict[str, Any],
@@ -1012,7 +1225,9 @@ async def review_merchant_kyc(
         )
     merchant.kyc_status = kyc_data.kyc_status
     if kyc_data.reason:
-        merchant.kyc_provider_ref = (merchant.kyc_provider_ref or "") + f" | {kyc_data.reason}"
+        merchant.kyc_provider_ref = (
+            merchant.kyc_provider_ref or ""
+        ) + f" | {kyc_data.reason}"
     await db.commit()
     await db.refresh(merchant)
     return {
@@ -1023,6 +1238,7 @@ async def review_merchant_kyc(
 
 
 # ── Dispute actions ──────────────────────────────────────────────────────
+
 
 @router.post("/disputes/{dispute_id}/accept")
 async def accept_dispute(
@@ -1038,7 +1254,10 @@ async def accept_dispute(
     if dispute.merchant_id not in owned:
         raise HTTPException(status_code=403, detail="Not authorized")
     if dispute.status != "open":
-        raise HTTPException(status_code=400, detail=f"Cannot accept dispute from status '{dispute.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot accept dispute from status '{dispute.status}'",
+        )
     dispute.status = "lost"
     await db.commit()
     await db.refresh(dispute)
@@ -1059,7 +1278,10 @@ async def submit_evidence(
     if dispute.merchant_id not in owned:
         raise HTTPException(status_code=403, detail="Not authorized")
     if dispute.status != "open":
-        raise HTTPException(status_code=400, detail=f"Cannot submit evidence from status '{dispute.status}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot submit evidence from status '{dispute.status}'",
+        )
     dispute.status = "evidence_submitted"
     await db.commit()
     await db.refresh(dispute)
@@ -1067,6 +1289,7 @@ async def submit_evidence(
 
 
 # ── Conversation actions ───────────────────────────────────────────────────
+
 
 @router.post("/conversations/{conversation_id}/resolve")
 async def resolve_conversation(
@@ -1089,5 +1312,3 @@ async def resolve_conversation(
 
 def get_router():
     return router
-
-

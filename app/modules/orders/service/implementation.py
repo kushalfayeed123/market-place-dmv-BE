@@ -146,6 +146,7 @@ class OrderServiceImpl(OrderService):
             currency=currency,
             total_amount=order_total,
             idempotency_key=idempotency_key,
+            delivery_address=checkout_data.delivery_address,
         )
 
         self._db.add(new_order)

@@ -90,6 +90,7 @@ class MerchantOrderDetail(BaseModel):
     fulfillment_status: Optional[str] = None
     fulfilled_at: Optional[datetime] = None
     fulfillment_summary: Optional[str] = None
+    delivery_address: Optional[dict] = None
     idempotency_key: Optional[str] = None
     buyer: MerchantOrderBuyer
     items: list[MerchantOrderItemDetail]

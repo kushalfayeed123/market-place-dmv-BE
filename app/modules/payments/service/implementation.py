@@ -551,7 +551,10 @@ async def _create_payout_hold_entries(db, order, payment_transaction, created_by
     held until the merchant confirms pay-on-delivery payment.
     """
     group_id = uuid.uuid4()
-    items_result = db.execute(
+    # ``db`` is an AsyncSession, so ``execute`` must be awaited; without this the
+    # returned coroutine has no ``scalars`` method and pay-on-delivery raises
+    # AttributeError at runtime (Paystack never reaches this helper).
+    items_result = await db.execute(
         select(OrderItem).where(OrderItem.order_id == order.id)
     )
     order_items = items_result.scalars().all()

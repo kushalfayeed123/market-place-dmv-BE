@@ -10,17 +10,22 @@ Covers:
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from uuid import uuid4
 
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash, to_uuid
 from app.models.category import Category
 from app.models.commission_plan import CommissionPlan
 from app.models.enums import InventoryPolicy
+from app.models.inventory import Inventory
+from app.models.ledger_entry import LedgerDirection, LedgerEntry, LedgerEntryType
 from app.models.merchant import KycStatus, Merchant
+from app.models.order import Order, OrderStatus
+from app.models.order_item import OrderItem
 from app.models.product import FulfillmentKind, Product, ProductStatus
 from app.models.product_variant import ProductVariant
 from app.models.store import Store
 from app.models.user import Gender, User, UserRole
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -28,7 +33,9 @@ from app.models.user import Gender, User, UserRole
 @pytest.fixture
 async def merchant_setup(db) -> dict:
     """Create a merchant owner, buyer, merchant, store, category, product, variant."""
-    plan = CommissionPlan(name="default", percentage_bps=1000, flat_fee_minor=0, is_default=True)
+    plan = CommissionPlan(
+        name="default", percentage_bps=1000, flat_fee_minor=0, is_default=True
+    )
     db.add(plan)
     await db.flush()
 
@@ -117,7 +124,10 @@ async def buyer_token(client: AsyncClient, merchant_setup: dict) -> str:
     """Log in as the buyer and return the bearer token."""
     resp = await client.post(
         "/api/v1/auth/login",
-        data={"username": merchant_setup["buyer_email"], "password": merchant_setup["buyer_password"]},
+        data={
+            "username": merchant_setup["buyer_email"],
+            "password": merchant_setup["buyer_password"],
+        },
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
@@ -128,7 +138,10 @@ async def merchant_owner_token(client: AsyncClient, merchant_setup: dict) -> str
     """Log in as the merchant owner and return the bearer token."""
     resp = await client.post(
         "/api/v1/auth/login",
-        data={"username": merchant_setup["owner_email"], "password": merchant_setup["owner_password"]},
+        data={
+            "username": merchant_setup["owner_email"],
+            "password": merchant_setup["owner_password"],
+        },
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
@@ -700,3 +713,262 @@ async def test_full_merchant_dashboard_flow(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["orders_to_fulfil"] == 0
+
+
+@pytest.mark.asyncio
+async def test_merchant_owner_ledger_entries_visible(
+    client: AsyncClient,
+    db,
+    merchant_setup: dict,
+    paid_order: dict,
+    merchant_owner_token: str,
+):
+    """A merchant owner's dashboard must surface their ledger entries.
+
+    Regression: ``GET /ledger/entries?merchant_id=...`` scoped the merchant
+    branch by ``user_id`` (a User UUID) instead of the real Merchant UUID, so
+    ``ledger_entries.merchant_id`` never matched and the Overview page's
+    LedgerTable was always empty for merchants.
+    """
+    headers = {"Authorization": f"Bearer {merchant_owner_token}"}
+    merchant_id = merchant_setup["merchant_id"]
+
+    db.add(
+        LedgerEntry(
+            entry_group_id=uuid4(),
+            account_type="merchant_wallet",
+            merchant_id=to_uuid(merchant_id),
+            order_id=to_uuid(paid_order["order_id"]),
+            entry_type="sale",
+            direction="credit",
+            amount=10000,
+            currency="NGN",
+        )
+    )
+    await db.commit()
+
+    resp = await client.get(
+        f"/api/v1/ledger/entries?merchant_id={merchant_id}",
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    entries = resp.json()
+    # Before the fix this was `[]` — the merchant_scope matched nothing.
+    assert len(entries) >= 1
+    assert any(e.get("entry_type") == "sale" for e in entries)
+
+
+@pytest.mark.asyncio
+async def test_ship_records_fulfillment_and_payout_release(
+    client: AsyncClient,
+    db,
+    merchant_setup: dict,
+    paid_order: dict,
+    merchant_owner_token: str,
+):
+    """Shipping (completing & delivering) an order must:
+
+    * create a DELIVERED fulfillment so the order detail page's delivery
+      section is populated, and
+    * record the group-g2 ``payout_release`` ledger entry on delivery
+      confirmation (the merchant's held funds move to payout-eligible).
+
+    Regression test: previously ``ship_order`` only flipped ``order.status``
+    to ``fulfilled`` and recorded nothing -- so the delivery section was empty
+    and no ledger transaction was recorded.
+    """
+    headers = {"Authorization": f"Bearer {merchant_owner_token}"}
+    order_id = paid_order["order_id"]
+    merchant_id = merchant_setup["merchant_id"]
+
+    # Sanity: no payout_release exists for this order yet.
+    before = (
+        (
+            await db.execute(
+                select(LedgerEntry).where(
+                    LedgerEntry.order_id == to_uuid(order_id),
+                    LedgerEntry.entry_type == LedgerEntryType.PAYOUT_RELEASE.value,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert before == []
+
+    # Ship == completed & delivered.
+    resp = await client.post(f"/api/v1/orders/{order_id}/ship", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "fulfilled"
+
+    # The detail endpoint now surfaces the delivery in the fulfillments list and
+    # carries a fulfilled_at timestamp (the "delivery section" used to be empty).
+    detail = await client.get(
+        f"/api/v1/merchants/{merchant_id}/orders/{order_id}",
+        headers=headers,
+    )
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["status"] == "fulfilled"
+    assert body["fulfilled_at"] is not None
+    assert len(body["fulfillments"]) == 1
+    ff = body["fulfillments"][0]
+    assert ff["status"] == "delivered"
+    assert ff["delivered_at"] is not None
+
+    # A payout_release ledger transaction was recorded on delivery confirmation.
+    rows = (
+        (
+            await db.execute(
+                select(LedgerEntry).where(
+                    LedgerEntry.order_id == to_uuid(order_id),
+                    LedgerEntry.merchant_id == to_uuid(merchant_id),
+                    LedgerEntry.entry_type == LedgerEntryType.PAYOUT_RELEASE.value,
+                    LedgerEntry.direction == LedgerDirection.CREDIT.value,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].account_type == "merchant_wallet"
+    assert rows[0].amount == 10000  # single 100.00 NGN minor-unit line item
+
+
+@pytest.mark.asyncio
+async def test_ship_consumes_inventory_reservation_for_tracked_variant(
+    client: AsyncClient,
+    db,
+):
+    """Shipping a TRACKED order releases the checkout-time reservation.
+
+    Checkout already hard-reserved tracked stock at order creation
+    (``quantity_available -= qty``, ``quantity_reserved += qty`` -- see
+    ``app.modules.orders.service``). On fulfillment the sold units leave the
+    warehouse, so ``ship_order`` must consume the held reservation
+    (``quantity_reserved -= shipped_qty``). It must NOT re-decrement
+    ``quantity_available`` -- that would double-count the sale and can violate
+    the ``ck_inventory_non_negative`` CHECK constraint.
+
+    Regression: previously ``ship_order`` left ``quantity_reserved``
+    permanently inflated, so fulfilling an order never updated inventory.
+    """
+    plan = CommissionPlan(
+        name="default", percentage_bps=1000, flat_fee_minor=0, is_default=True
+    )
+    db.add(plan)
+    await db.flush()
+
+    cat = Category(name="Inventory Test")
+    db.add(cat)
+    await db.flush()
+
+    owner = User(
+        email="inv_owner@example.com",
+        password_hash=get_password_hash("InvPass123!"),
+        role=UserRole.MERCHANT_OWNER,
+        first_name="Inv",
+        last_name="Owner",
+        gender=Gender.UNSET,
+    )
+    db.add(owner)
+    await db.flush()
+
+    merchant = Merchant(
+        owner_user_id=owner.id,
+        business_name="Inv Merchant",
+        slug="inv-merchant-" + owner.id.hex[:8],
+        kyc_status=KycStatus.VERIFIED,
+        commission_plan_id=plan.id,
+        country="NG",
+    )
+    db.add(merchant)
+    await db.flush()
+
+    store = Store(
+        merchant_id=merchant.id,
+        name="Inv Store",
+        slug="inv-store-" + owner.id.hex[:8],
+    )
+    db.add(store)
+    await db.flush()
+
+    product = Product(
+        merchant_id=merchant.id,
+        store_id=store.id,
+        category_id=cat.id,
+        title="Inv Product",
+        slug="inv-product-" + owner.id.hex[:8],
+        description="Tracked inventory for the ship-decrement regression test",
+        fulfillment_type=FulfillmentKind.PHYSICAL.value,
+        status=ProductStatus.ACTIVE.value,
+        base_price_amount=10000,
+        base_price_currency="NGN",
+    )
+    db.add(product)
+    await db.flush()
+
+    variant = ProductVariant(
+        product_id=product.id,
+        sku="INV-SKU-" + owner.id.hex[:8],
+        attributes="{}",
+        inventory_policy=InventoryPolicy.TRACKED.value,
+    )
+    db.add(variant)
+    await db.flush()
+
+    # Inventory reflecting the post-checkout reservation state for a 2-unit
+    # order: the 2 sold units are held as reserved (available already reduced at
+    # checkout).
+    inventory = Inventory(
+        variant_id=variant.id,
+        quantity_available=8,
+        quantity_reserved=2,
+    )
+    db.add(inventory)
+    await db.flush()
+
+    order = Order(
+        buyer_id=owner.id,
+        order_number="ORD-INV-" + owner.id.hex[:8],
+        status=OrderStatus.PAID.value,
+        currency="NGN",
+        total_amount=20000,
+    )
+    db.add(order)
+    await db.flush()
+
+    db.add(
+        OrderItem(
+            order_id=order.id,
+            merchant_id=merchant.id,
+            product_id=product.id,
+            variant_id=variant.id,
+            quantity=2,
+            unit_price=10000,
+            currency="NGN",
+            line_total=20000,
+        )
+    )
+    await db.commit()
+
+    login = await client.post(
+        "/api/v1/auth/login",
+        data={"username": owner.email, "password": "InvPass123!"},
+    )
+    assert login.status_code == 200, login.text
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    # Fulfillment trigger: paid -> fulfilled.
+    ship = await client.post(f"/api/v1/orders/{order.id}/ship", headers=headers)
+    assert ship.status_code == 200, ship.text
+    assert ship.json()["status"] == "fulfilled"
+
+    # The checkout reservation is consumed; `available` (already reduced at
+    # checkout) is unchanged -- the sale is reflected exactly once.
+    inv_after = (
+        await db.execute(select(Inventory).where(Inventory.variant_id == variant.id))
+    ).scalar_one()
+    assert inv_after.quantity_reserved == 0
+    assert inv_after.quantity_available == 8

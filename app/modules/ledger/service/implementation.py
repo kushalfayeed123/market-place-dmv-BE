@@ -89,10 +89,21 @@ class LedgerServiceImpl(LedgerService):
 
         elif user_role in ["merchant_owner", "merchant_staff"]:
             # Merchants can only see ledger entries related to their merchant wallet.
-            # Enforce token-based merchant ID, overriding/setting the filter parameter.
-            if user_id:
-                merchant_id = user_id
-            else:
+            # A user's id is NOT a merchant id — ledger_entries.merchant_id references a
+            # Merchant (Merchant.owner_user_id == User.id), so scoping by user_id matched
+            # nothing and the dashboard always rendered an empty ledger. Derive the real
+            # merchant from the token (owner) or fall back to the supplied merchant_id
+            # (mirrors get_balance, which scopes by the path merchant_id).
+            if user_role == "merchant_owner" and user_id:
+                owner_result = await self._db.execute(
+                    select(Merchant).where(Merchant.owner_user_id == to_uuid(user_id))
+                )
+                merchant_obj = owner_result.scalar_one_or_none()
+                if merchant_obj:
+                    merchant_id = str(merchant_obj.id)
+                else:
+                    return []
+            elif not merchant_id:
                 return []
 
         elif user_role == "admin":

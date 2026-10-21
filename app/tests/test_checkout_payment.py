@@ -342,3 +342,44 @@ async def test_get_payment_methods_lists_providers(
     assert paystack["implemented"] is True
     flutterwave = next(m for m in methods if m["key"] == "flutterwave")
     assert flutterwave["implemented"] is False
+
+@pytest.mark.asyncio
+async def test_pay_on_delivery_marks_order_awaiting_approval(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict
+):
+    """Pay on Delivery must not error (regression).
+
+    The COD branch calls ``_create_payout_hold_entries`` which used to call the
+    async session's ``execute`` without ``await``, raising AttributeError (500)
+    on every Pay-on-Delivery attempt.  After the fix the endpoint returns 201
+    with a ``pending_verification`` payment and moves the order to
+    ``awaiting_approval`` without touching any online provider.
+    """
+    variant_id = seed_data["variant_id"]
+
+    # 1. Checkout -> order in "pending" status
+    checkout_resp = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": variant_id, "quantity": 1}]},
+        headers={**buyer_headers, "Idempotency-Key": "e2e-pod-checkout-1"},
+    )
+    assert checkout_resp.status_code == 201, checkout_resp.text
+    order_id = checkout_resp.json()["id"]
+
+    # 2. Process payment with the pay-on-delivery provider
+    pay_resp = await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": order_id, "provider": "pay_on_delivery"},
+        headers={**buyer_headers, "Idempotency-Key": "e2e-pod-pay-1"},
+    )
+    assert pay_resp.status_code == 201, pay_resp.text
+    payment = pay_resp.json()
+    assert payment["provider"] == "pay_on_delivery"
+    assert payment["status"] == "pending_verification"
+    assert payment["payment_method"] == "pay_on_delivery"
+    assert payment["payment_url"] is None
+
+    # 3. Order should now be awaiting merchant approval
+    order_resp = await client.get(f"/api/v1/orders/{order_id}", headers=buyer_headers)
+    assert order_resp.status_code == 200
+    assert order_resp.json()["status"] == "awaiting_approval"
