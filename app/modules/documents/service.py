@@ -29,6 +29,7 @@ from app.core.storage import (
     presign_upload,
     public_url_for,
     guess_content_type,
+    read_object_head,
     signature_matches,
     upload_file_from_bytes,
 )
@@ -87,6 +88,19 @@ def to_uuid_safe(value: str | None):
         return to_uuid(value)
     except (ValueError, TypeError):
         return None
+
+
+def _check_magic(content_type: str, head: bytes) -> bool:
+    """
+    Verify that *head* starts with the expected magic signature for *content_type*.
+
+    Returns ``True`` if the content type is unknown (can't validate) or the
+    signature matches; returns ``False`` otherwise.
+    """
+    expected = MAGIC_SIGNATURES.get(content_type)
+    if expected is None:
+        return True
+    return head[: len(expected)] == expected
 
 
 def _to_response(doc: Document) -> DocumentResponse:
@@ -260,6 +274,21 @@ class DocumentService:
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail="Checksum mismatch — file may be corrupted",
                 )
+
+        # Verify magic bytes match the declared content type
+        head = await run_in_threadpool(
+            read_object_head,
+            bucket=settings.S3_BUCKET,
+            key=request.key,
+        )
+        if head is not None and not _check_magic(doc.content_type, head):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"File content does not match declared content type "
+                    f"'{doc.content_type}' — possible spoofing"
+                ),
+            )
 
         # Link to domain model
         await self._link_to_domain(doc)

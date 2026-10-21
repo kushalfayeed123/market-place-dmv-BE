@@ -220,3 +220,25 @@ def public_url_for(key: str) -> str:
     if base:
         return f"{base}/{key}"
     return key
+
+
+def read_object_head(*, bucket: str, key: str, length: int = 512) -> bytes | None:
+    """
+    Download the first *length* bytes of an object from S3.
+
+    Uses a ranged GET request so only a small prefix is transferred.
+    Returns ``None`` if the object does not exist.
+    """
+    client = _s3_client()
+    try:
+        response = client.get_object(
+            Bucket=bucket, Key=key, Range=f"bytes=0-{length - 1}"
+        )
+        return response["Body"].read()
+    except client.exceptions.ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        if error_code in ("404", "NoSuchKey", "NotFound"):
+            return None
+        logger.warning("S3 get_object failed for %s/%s: %s", bucket, key, exc)
+        return None
+
