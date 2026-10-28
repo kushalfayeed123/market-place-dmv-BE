@@ -5,10 +5,6 @@ Communicates with the service layer via the CatalogService abstraction.
 """
 
 
-import mimetypes
-import uuid
-from pathlib import Path
-
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
 from app.core.security import get_current_active_user, to_uuid
 from app.db.session import get_db
@@ -18,6 +14,7 @@ from app.models.store import Store
 from app.models.user import UserRole
 from app.modules.catalog.service.base import CatalogService
 from app.modules.catalog.service.dependency import get_catalog_service
+from app.modules.documents.service import DocumentService
 from app.schemas.catalog import (
     CategoryCreate,
     CategoryResponse,
@@ -34,11 +31,6 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
-
-# Local filesystem backing for product image uploads. Served via StaticFiles mounted
-# at /uploads in app/main.py. For production, replace with S3-backed storage by
-# switching this endpoint to use the documents subsystem's presigned upload flow.
-UPLOAD_DIR = Path(__file__).resolve().parents[3] / "static" / "uploads" / "products"
 
 # Module-level dependency singletons (avoids B008 function calls in argument defaults)
 get_current_active_user_depends = Depends(get_current_active_user)
@@ -167,9 +159,17 @@ async def create_product(
     try:
         response_data = await service.create_product(product_data)
     except ValueError as e:
+        # Attribute-schema validation errors are "missing required fields"
+        # â€” signal them as 422 so the frontend can prompt the user to fill
+        # in the required attributes.
+        detail = str(e)
+        if detail.startswith("Missing required attribute"):
+            code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        else:
+            code = status.HTTP_400_BAD_REQUEST
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            status_code=code,
+            detail=detail,
         )
 
     await finalize_idempotency(
@@ -370,12 +370,15 @@ async def upload_product_image(
     image: UploadFile = File(..., description="Product image (PNG/JPG/WebP/GIF, max 5MB)"),
     current_user: dict = get_current_active_user_depends,
     service: CatalogService = get_catalog_service_depends,
+    db: AsyncSession = get_db_depends,
 ):
-    """Upload a product image and append its URL to the product's `urls`.
+    """Upload a product image to S3 and append its URL to the product's `urls`.
 
-    Workflow: create the product first (`POST /products`), then call this endpoint one
-    or more times to add images. Each uploaded image is stored under
-    `/uploads/products/` and its URL is appended to `Product.urls`.
+    Workflow: create the product first (`POST /products`), then call this endpoint
+    one or more times to add images. Each image is validated, uploaded directly to
+    the S3 bucket (not the local filesystem), and the resulting public URL is
+    appended to `Product.urls` via the documents subsystem's domain-linking logic.
+    A product may have multiple images — call this endpoint repeatedly.
     """
     if current_user.role.value not in ["merchant_owner", "merchant_staff", "platform_admin"]:
         raise HTTPException(
@@ -395,7 +398,7 @@ async def upload_product_image(
     if ext is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File must be an image (PNG/JPG/WebP/GIF)",
+            detail="File must be an image (PNG/JPG/Webp/GIF)",
         )
 
     contents = await image.read()
@@ -408,19 +411,34 @@ async def upload_product_image(
     if not contents:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file")
 
-    filename = f"{uuid.uuid4().hex}{ext}"
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    (UPLOAD_DIR / filename).write_bytes(contents)
-    image_url = f"/uploads/products/{filename}"
-
+    # Upload to S3 via the documents subsystem.  This creates a COMPLETE
+    # Document record, pushes the bytes to S3 with ``ACL: public-read``,
+    # and links the resulting public URL to the product's `urls` list
+    # via `_link_to_domain`.
+    doc_service = DocumentService(db)
     try:
-        product = await service.add_product_image(product_id, image_url)
+        await doc_service.upload_product_image(
+            product_id_str=product_id,
+            file_data=contents,
+            original_filename=image.filename or "image",
+            content_type=content_type,
+        )
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e),
         )
-    return product
+
+    # Return the updated product (with the new image URL in `urls`).
+    updated = await service.get_product(product_id)
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product {product_id} not found",
+        )
+    return updated
 
 
 # Inventory endpoints

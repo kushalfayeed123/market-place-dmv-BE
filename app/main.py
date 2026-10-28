@@ -5,11 +5,9 @@ Initializes the app, registers middleware, and includes routers.
 """
 
 import logging
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.core.logging import setup_logging
@@ -84,11 +82,6 @@ app.include_router(support_router, prefix=f"{settings.API_V1_STR}/support", tags
 # overlapping path segments (e.g. /orders/{id} vs /orders/{id}/accept).
 app.include_router(merchant_console_router, prefix=settings.API_V1_STR, tags=["merchant-console"])
 app.include_router(agent_router, prefix=settings.API_V1_STR, tags=["agent"])
-
-# Serve product image uploads at /uploads/* (written by the catalog image-upload route)
-_uploads_root = Path(__file__).resolve().parents[1] / "static" / "uploads"
-_uploads_root.mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=str(_uploads_root)), name="uploads")
 
 # Setup security after routers are included (configures OAuth2 bearer token for Swagger UI)
 setup_security(app)

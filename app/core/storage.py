@@ -16,7 +16,8 @@ Public functions:
 * ``delete_object``       – delete a single object from S3.
 * ``key_exists``          – head-object existence check.
 * ``upload_file_from_bytes`` – upload an in-memory blob (used by the migration
-                            script when copying files from local disk).
+                            script when copying files from local disk).  Raises
+                            ``S3UploadError`` on failure.
 * ``guess_content_type``  – MIME-type guess with safe fallback.
 * ``public_url_for``      – build a public CDN URL when configured.
 """
@@ -35,6 +36,15 @@ from botocore.client import Config
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class S3UploadError(RuntimeError):
+    """Raised when an object cannot be uploaded to S3 (e.g. auth failure,
+    network error, access denied).
+
+    Callers should catch this and surface a meaningful HTTP error to the
+    client rather than continuing as if the upload succeeded.
+    """
 
 
 def _s3_client():
@@ -181,23 +191,29 @@ def upload_file_from_bytes(
     key: str,
     data: bytes,
     content_type: str | None = None,
+    acl: str | None = None,
 ) -> bool:
     """
     Upload an in-memory byte payload to S3.
 
     Used by the migration script (and tests) to push local files or bytes
-    into S3.
+    into S3.  Set ``acl="public-read"`` for objects that should be publicly
+    accessible (e.g. product images).
     """
     client = _s3_client()
     extra_args: dict[str, Any] = {}
     if content_type:
         extra_args["ContentType"] = content_type
+    if acl:
+        extra_args["ACL"] = acl
     try:
         client.put_object(Bucket=bucket, Key=key, Body=data, **extra_args)
         return True
     except client.exceptions.ClientError as exc:
         logger.error("S3 put_object failed for %s/%s: %s", bucket, key, exc)
-        return False
+        raise S3UploadError(
+            f"Failed to upload to S3 bucket '{bucket}' at key '{key}': {exc}"
+        ) from exc
 
 
 def guess_content_type(filename: str, fallback: str = "application/octet-stream") -> str:
@@ -208,17 +224,19 @@ def guess_content_type(filename: str, fallback: str = "application/octet-stream"
 
 def public_url_for(key: str) -> str:
     """
-    Build a public CDN URL when ``S3_PUBLIC_BASE_URL`` is configured,
-    otherwise return the raw key.
+    Build a publicly accessible URL for an S3 object.
+
+    * If ``S3_PUBLIC_BASE_URL`` is configured (e.g. a CloudFront
+      distribution), the key is appended to that base.
+    * Otherwise, the S3 virtual-hosted-style URL is constructed
+      directly.  This works when the object ACL is ``public-read``.
     """
-    base = (
-        settings.S3_PUBLIC_BASE_URL.rstrip("/")
-        if settings.S3_PUBLIC_BASE_URL
-        else ""
-    )
+    base = settings.S3_PUBLIC_BASE_URL
     if base:
-        return f"{base}/{key}"
-    return key
+        return f"{base.rstrip('/')}/{key}"
+    # Fall back to the S3 REST endpoint — requires the object to have
+    # ``ACL: public-read`` (set at upload time for public documents).
+    return f"https://{settings.S3_BUCKET}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
 
 
 def read_object_head(*, bucket: str, key: str, length: int = 512) -> bytes | None:

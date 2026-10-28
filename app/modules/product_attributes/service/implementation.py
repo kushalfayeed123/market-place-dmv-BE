@@ -55,7 +55,7 @@ class ProductAttributeSchemaServiceImpl(ProductAttributeSchemaService):
         # Create new schema
         new_schema = ProductAttributeSchema(
             category_id=category_uuid,
-            schema=json.dumps(schema_data.schema),
+            schema=json.dumps(schema_data.json_schema),
         )
 
         self._db.add(new_schema)
@@ -125,7 +125,7 @@ class ProductAttributeSchemaServiceImpl(ProductAttributeSchemaService):
             raise ValueError(f"No attribute schema found for category '{category_id}'")
 
         # Update schema
-        existing_schema.schema = json.dumps(schema_data.schema)
+        existing_schema.schema = json.dumps(schema_data.json_schema)
         await self._db.commit()
         await self._db.refresh(existing_schema)
 
@@ -168,5 +168,5 @@ class ProductAttributeSchemaServiceImpl(ProductAttributeSchemaService):
 
         return ProductAttributeSchemaResponse(
             category_id=str(schema.category_id),
-            schema=schema_data or {},
+            json_schema=schema_data or {},
         )

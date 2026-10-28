@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import settings
 from app.core.security import to_uuid
 from app.core.storage import (
+    S3UploadError,
     build_key,
     delete_object,
     inspect_object,
@@ -564,17 +565,21 @@ class DocumentService:
             original_filename=original_filename,
         )
         content_type = guess_content_type(original_filename)
-        await run_in_threadpool(
-            upload_file_from_bytes,
-            bucket=settings.S3_BUCKET,
-            key=key,
-            data=file_data,
-            content_type=content_type,
-        )
+        try:
+            await run_in_threadpool(
+                upload_file_from_bytes,
+                bucket=settings.S3_BUCKET,
+                key=key,
+                data=file_data,
+                content_type=content_type,
+            )
+        except S3UploadError as exc:
+            logger.error("Migration upload failed for key %s: %s", key, exc)
+            raise
         return public_url_for(key)
 
-    async def _get_product_merchant(self, product_id_str: str):
-        """Look up the merchant_id for a product (used during migration)."""
+    async def _get_product(self, product_id_str: str):
+        """Fetch a Product row by its UUID, raising 404 when not found."""
         from app.models.product import Product
 
         pid = to_uuid(product_id_str)
@@ -587,6 +592,120 @@ class DocumentService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Product {product_id_str} not found",
             )
+        return product
+
+    async def _get_product_merchant(self, product_id_str: str):
+        """Look up the merchant_id for a product (used during migration)."""
+        product = await self._get_product(product_id_str)
         return product.merchant_id
+
+    async def upload_product_image(
+        self,
+        product_id_str: str,
+        file_data: bytes,
+        original_filename: str,
+        content_type: str,
+    ) -> DocumentResponse:
+        """
+        Server-side upload of a product image to S3.
+
+        Validates the file, uploads it directly to S3 with ``public-read``
+        ACL, creates a ``COMPLETE`` document record, and links the public
+        URL to the product's ``urls`` list via :meth:`_link_to_domain`.
+
+        This is the server-side counterpart to the browser presigned-POST
+        flow (``create_presigned_upload`` → browser → S3 →
+        ``complete_upload``).  It is used by the catalog product-image
+        endpoint which receives the file via a standard multipart form
+        POST.
+        """
+        purpose = DocumentPurpose.PRODUCT_IMAGE.value
+
+        # ── Validate content type ──────────────────────────────────
+        allowed = ALLOWED_CONTENT_TYPES.get(purpose, set())
+        if allowed and content_type not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Content type '{content_type}' is not allowed "
+                    f"for purpose '{purpose}'. "
+                    f"Allowed: {sorted(allowed)}"
+                ),
+            )
+
+        # ── Validate size ──────────────────────────────────────────
+        max_bytes = settings.S3_MAX_UPLOAD_MB * 1024 * 1024
+        if len(file_data) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File exceeds max upload size of {settings.S3_MAX_UPLOAD_MB}MB",
+            )
+        if len(file_data) <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File size must be greater than zero",
+            )
+
+        # ── Validate magic bytes ───────────────────────────────────
+        if not _check_magic(content_type, file_data):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"File content does not match declared content type "
+                    f"'{content_type}' — possible spoofing"
+                ),
+            )
+
+        # ── Resolve product + merchant ─────────────────────────────
+        product = await self._get_product(product_id_str)
+        merchant_id = product.merchant_id
+
+        # ── Build S3 key and upload ────────────────────────────────
+        key = build_key(
+            merchant_id=str(merchant_id),
+            purpose=purpose,
+            original_filename=original_filename,
+        )
+
+        try:
+            await run_in_threadpool(
+                upload_file_from_bytes,
+                bucket=settings.S3_BUCKET,
+                key=key,
+                data=file_data,
+                content_type=content_type,
+                acl="public-read",  # product images are publicly accessible
+            )
+        except S3UploadError as exc:
+            # S3 upload failed (auth failure, network error, etc.).
+            # Do NOT create a Document record or link a URL to the product —
+            # the image was never successfully stored.
+            logger.error("Product image upload failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to store product image. Please try again.",
+            ) from exc
+
+        # ── Create COMPLETE document record ─────────────────────────
+        doc = Document(
+            purpose=purpose,
+            merchant_id=merchant_id,
+            filename=original_filename,
+            content_type=content_type,
+            size_bytes=len(file_data),
+            object_key=key,
+            status=DocumentStatus.COMPLETE.value,
+            public=True,
+            related_type="Product",
+            related_id=product.id,
+        )
+        self._db.add(doc)
+
+        # Link to domain model (appends the public URL to product.urls)
+        await self._link_to_domain(doc)
+
+        await self._db.commit()
+        await self._db.refresh(doc)
+        return _to_response(doc)
 
 

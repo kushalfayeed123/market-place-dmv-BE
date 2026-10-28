@@ -238,11 +238,14 @@ class CatalogServiceImpl(CatalogService):
         if not schema:
             return
         
-        # Check required fields
+        # Check required fields â€” collect ALL missing fields for a single
+        # error message so the frontend can display them together.
         required_fields = schema.get("required", [])
-        for field in required_fields:
-            if field not in attributes:
-                raise ValueError(f"Missing required attribute: '{field}'")
+        missing = [f for f in required_fields if f not in attributes]
+        if missing:
+            raise ValueError(
+                f"Missing required attribute(s): {', '.join(repr(f) for f in missing)}"
+            )
         
         # Check property types
         properties = schema.get("properties", {})

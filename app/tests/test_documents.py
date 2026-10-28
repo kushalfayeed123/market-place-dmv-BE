@@ -22,6 +22,7 @@ from app.core.storage import (
     delete_object,
     inspect_object,
     presign_upload,
+    public_url_for,
     upload_file_from_bytes,
 )
 from app.models.document import Document
@@ -597,3 +598,235 @@ class TestPresignedUploadStorage:
 
         assert inspect_object(bucket=settings.S3_BUCKET, key=key) is None
 
+
+# ── Server-side product image upload ───────────────────────────────────────
+
+
+class TestUploadProductImage:
+    """Tests for ``DocumentService.upload_product_image``.
+
+    Unlike ``create_presigned_upload`` / ``complete_upload`` (which are
+    designed for browser-to-S3 uploads), ``upload_product_image`` performs a
+    server-side upload of an already-received file blob.  It still creates a
+    ``COMPLETE`` Document record, pushes the bytes to S3 with
+    ``ACL: public-read``, and links the public URL to the product.
+    """
+
+    @pytest.fixture
+    def png_data(self) -> bytes:
+        """A minimal valid PNG payload (header + padding)."""
+        return b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+
+    # ── Happy path ──────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_upload_creates_complete_document(
+        self, service, test_product, png_data
+    ):
+        """The returned DocumentResponse should be COMPLETE with correct metadata."""
+        result = await service.upload_product_image(
+            product_id_str=str(test_product.id),
+            file_data=png_data,
+            original_filename="photo.png",
+            content_type="image/png",
+        )
+
+        assert result.status == DocumentStatus.COMPLETE.value
+        assert result.purpose == DocumentPurpose.PRODUCT_IMAGE.value
+        assert result.public is True
+        assert result.related_type == "Product"
+        assert str(result.related_id) == str(test_product.id)
+        assert result.size_bytes == len(png_data)
+        assert result.filename == "photo.png"
+
+    @pytest.mark.asyncio
+    async def test_upload_writes_object_to_s3(
+        self, service, test_product, png_data
+    ):
+        """The bytes should actually exist in the (mocked) S3 bucket."""
+        result = await service.upload_product_image(
+            product_id_str=str(test_product.id),
+            file_data=png_data,
+            original_filename="photo.png",
+            content_type="image/png",
+        )
+
+        meta = inspect_object(
+            bucket=settings.S3_BUCKET, key=result.object_key
+        )
+        assert meta is not None
+        assert meta["ContentType"] == "image/png"
+        assert meta["ContentLength"] == len(png_data)
+
+    @pytest.mark.asyncio
+    async def test_upload_links_url_to_product(
+        self, service, test_product, db, png_data
+    ):
+        """The public URL should be appended to ``Product.urls``."""
+        result = await service.upload_product_image(
+            product_id_str=str(test_product.id),
+            file_data=png_data,
+            original_filename="photo.png",
+            content_type="image/png",
+        )
+
+        product = await db.get(Product, test_product.id)
+        urls = json.loads(product.urls)
+        expected = public_url_for(result.object_key)
+        assert expected in urls
+
+    @pytest.mark.asyncio
+    async def test_upload_multiple_images_appends_distinct_urls(
+        self, service, test_product, db, png_data
+    ):
+        """Each call should append a distinct URL to the product."""
+        for n in range(3):
+            await service.upload_product_image(
+                product_id_str=str(test_product.id),
+                file_data=png_data,
+                original_filename=f"photo{n}.png",
+                content_type="image/png",
+            )
+
+        product = await db.get(Product, test_product.id)
+        urls = json.loads(product.urls)
+        assert len(urls) == 3
+        assert len(set(urls)) == 3  # all unique
+
+    @pytest.mark.asyncio
+    async def test_upload_same_file_produces_unique_keys(
+        self, service, test_product, db, png_data
+    ):
+        """Uploading the same file should still produce a unique S3 key (UUID-based)."""
+        r1 = await service.upload_product_image(
+            product_id_str=str(test_product.id),
+            file_data=png_data,
+            original_filename="photo.png",
+            content_type="image/png",
+        )
+        r2 = await service.upload_product_image(
+            product_id_str=str(test_product.id),
+            file_data=png_data,
+            original_filename="photo.png",
+            content_type="image/png",
+        )
+
+        assert r1.object_key != r2.object_key
+        product = await db.get(Product, test_product.id)
+        urls = json.loads(product.urls)
+        assert len(urls) == 2
+
+    # ── Validation ──────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_non_image_content_type(
+        self, service, test_product
+    ):
+        """A content type not in the allowed set should raise 400."""
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.upload_product_image(
+                product_id_str=str(test_product.id),
+                file_data=b"some data",
+                original_filename="file.exe",
+                content_type="application/octet-stream",
+            )
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_size_too_large(
+        self, service, test_product
+    ):
+        """A payload exceeding ``S3_MAX_UPLOAD_MB`` should raise 413."""
+        from fastapi import HTTPException
+
+        too_big = b"\x89PNG" + b"\x00" * (
+            settings.S3_MAX_UPLOAD_MB * 1024 * 1024 + 1
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await service.upload_product_image(
+                product_id_str=str(test_product.id),
+                file_data=too_big,
+                original_filename="big.png",
+                content_type="image/png",
+            )
+        assert exc_info.value.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_empty_file(self, service, test_product):
+        """An empty payload should raise 400."""
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.upload_product_image(
+                product_id_str=str(test_product.id),
+                file_data=b"",
+                original_filename="empty.png",
+                content_type="image/png",
+            )
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_magic_byte_mismatch(
+        self, service, test_product
+    ):
+        """Data whose header doesn't match the declared content type \u2192 422."""
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.upload_product_image(
+                product_id_str=str(test_product.id),
+                file_data=b"NOT A PNG FILE" + b"\x00" * 100,
+                original_filename="fake.png",
+                content_type="image/png",
+            )
+        assert exc_info.value.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_nonexistent_product(self, service, png_data):
+        """A product that doesn't exist should raise 404."""
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.upload_product_image(
+                product_id_str=str(uuid.uuid4()),
+                file_data=png_data,
+                original_filename="photo.png",
+                content_type="image/png",
+            )
+        assert exc_info.value.status_code == 404
+
+
+
+class TestPublicUrlFor:
+    """Tests for ``public_url_for`` URL construction."""
+
+    def test_returns_s3_url_when_no_base_url(self, monkeypatch):
+        """When S3_PUBLIC_BASE_URL is empty, return the S3 REST URL."""
+        import app.core.storage as storage_mod
+        monkeypatch.setattr(storage_mod.settings, "S3_PUBLIC_BASE_URL", "")
+        url = storage_mod.public_url_for("product_image/m-1/uuid.png")
+        assert url == (
+            f"https://{storage_mod.settings.S3_BUCKET}"
+            f".s3.{storage_mod.settings.AWS_REGION}.amazonaws.com"
+            f"/product_image/m-1/uuid.png"
+        )
+
+    def test_returns_base_url_when_configured(self, monkeypatch):
+        """When S3_PUBLIC_BASE_URL is set, prepend it."""
+        import app.core.storage as storage_mod
+        monkeypatch.setattr(
+            storage_mod.settings, "S3_PUBLIC_BASE_URL", "https://cdn.example.com"
+        )
+        url = storage_mod.public_url_for("product_image/m-1/uuid.png")
+        assert url == "https://cdn.example.com/product_image/m-1/uuid.png"
+
+    def test_strips_trailing_slash_from_base(self, monkeypatch):
+        """A trailing slash on S3_PUBLIC_BASE_URL should be removed."""
+        import app.core.storage as storage_mod
+        monkeypatch.setattr(
+            storage_mod.settings, "S3_PUBLIC_BASE_URL", "https://cdn.example.com/"
+        )
+        url = storage_mod.public_url_for("some/key.png")
+        assert url == "https://cdn.example.com/some/key.png"
