@@ -148,3 +148,25 @@ class FulfillmentService(ABC):
             ValueError: If fulfillment not found.
         """
         ...
+
+    @abstractmethod
+    async def mark_delivered(
+        self, fulfillment_id: str
+    ) -> FulfillmentResponse:
+        """
+        Mark a shipped fulfillment as delivered.
+
+        Transitions the fulfillment from 'shipped' to 'delivered', records
+        the ``delivered_at`` timestamp, and (if all fulfillments for the
+        order are now delivered) marks the parent order as 'fulfilled'.
+
+        Args:
+            fulfillment_id: The fulfillment ID to mark delivered.
+
+        Returns:
+            The updated fulfillment response.
+
+        Raises:
+            ValueError: If fulfillment not found or not in 'shipped' status.
+        """
+        ...

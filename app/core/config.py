@@ -88,15 +88,14 @@ class Settings(BaseSettings):
     PAYSTACK_SECRET_KEY: str = Field(..., env="PAYSTACK_SECRET_KEY")
     PAYSTACK_PUBLIC_KEY: str = Field(..., env="PAYSTACK_PUBLIC_KEY")
 
-    # Cloudflare R2
-    R2_BUCKET: str = Field(..., env="R2_BUCKET")
-    R2_ACCESS_KEY_ID: str = Field(..., env="R2_ACCESS_KEY_ID")
-    R2_SECRET_ACCESS_KEY: str = Field(..., env="R2_SECRET_ACCESS_KEY")
-
-    # ── AWS S3 (document storage) ──────────────────────────────────────────
-    # S3 is the primary backend for the `documents` subsystem.  Local dev and
-    # testing use moto (mock_aws) so these still need to resolve from env.
+    # ── AWS S3 (object storage) ────────────────────────────────────────────
+    # S3-compatible object storage used by the `documents` subsystem (product
+    # images, KYC documents, store logos/banners, avatars).  Local dev and
+    # testing use moto (mock_aws) at the transport layer so no real credentials
+    # are required during tests.  In production set real AWS credentials.
     AWS_REGION: str = Field("us-east-1", env="AWS_REGION")
+    AWS_ACCESS_KEY_ID: str = Field(..., env="AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY: str = Field(..., env="AWS_SECRET_ACCESS_KEY")
     S3_BUCKET: str = Field(..., env="S3_BUCKET")
     S3_UPLOAD_URL_TTL_SECONDS: int = Field(3600, env="S3_UPLOAD_URL_TTL_SECONDS")
     S3_DOWNLOAD_URL_TTL_SECONDS: int = Field(300, env="S3_DOWNLOAD_URL_TTL_SECONDS")

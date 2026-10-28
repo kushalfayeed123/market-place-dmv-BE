@@ -14,8 +14,10 @@ from app.models.enums import DeliveryMethod, FulfillmentKindOrder, FulfillmentSt
 
 class OrderStatus(str, PyEnum):
     PENDING = "pending"
+    ACCEPTED = "accepted"          # Merchant has accepted the order; not yet paid
     PAID = "paid"
     PARTIALLY_FULFILLED = "partially_fulfilled"
+    SHIPPED = "shipped"            # Merchant has shipped; awaiting delivery confirmation
     FULFILLED = "fulfilled"
     CANCELLED = "cancelled"
     REFUNDED = "refunded"

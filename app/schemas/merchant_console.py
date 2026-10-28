@@ -77,6 +77,16 @@ class MerchantOrderFulfillment(BaseModel):
     delivered_at: Optional[datetime] = None
 
 
+class ShipOrderRequest(BaseModel):
+    """Optional body for the ship endpoint — captures delivery specifics."""
+    carrier: Optional[str] = Field(
+        None, description="Courier / logistics provider name."
+    )
+    tracking_number: Optional[str] = Field(
+        None, description="Tracking / waybill number from the carrier."
+    )
+
+
 class MerchantOrderDetail(BaseModel):
     id: str
     order_number: str

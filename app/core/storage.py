@@ -26,7 +26,6 @@ from __future__ import annotations
 import hmac as _hmac
 import logging
 import mimetypes
-import os
 import uuid
 from typing import Any
 
@@ -48,8 +47,8 @@ def _s3_client():
     return boto3.client(
         "s3",
         region_name=settings.AWS_REGION,
-        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
         config=Config(signature_version="s3v4"),
     )
 

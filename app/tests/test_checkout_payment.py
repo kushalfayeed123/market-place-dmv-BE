@@ -129,6 +129,7 @@ async def test_checkout_creates_order(
     variant_id = seed_data["variant_id"]
     payload = {
         "items": [{"variant_id": variant_id, "quantity": 1}],
+        "fulfillment_option": "pickup",
     }
     resp = await client.post(
         "/api/v1/orders/checkout",
@@ -159,7 +160,7 @@ async def test_process_payment_initializes_transaction(
     variant_id = seed_data["variant_id"]
     checkout_resp = await client.post(
         "/api/v1/orders/checkout",
-        json={"items": [{"variant_id": variant_id, "quantity": 1}]},
+        json={"items": [{"variant_id": variant_id, "quantity": 1}], "fulfillment_option": "pickup"},
         headers={**buyer_headers, "Idempotency-Key": "e2e-pay-checkout-1"},
     )
     assert checkout_resp.status_code == 201
@@ -187,7 +188,7 @@ async def test_webhook_updates_payment_and_order_status(
     # 1. Checkout
     checkout_resp = await client.post(
         "/api/v1/orders/checkout",
-        json={"items": [{"variant_id": variant_id, "quantity": 1}]},
+        json={"items": [{"variant_id": variant_id, "quantity": 1}], "fulfillment_option": "pickup"},
         headers={**buyer_headers, "Idempotency-Key": "e2e-wh-checkout-1"},
     )
     assert checkout_resp.status_code == 201
@@ -282,7 +283,7 @@ async def test_stub_simulate_completes_payment_end_to_end(
     # 1. Checkout
     checkout_resp = await client.post(
         "/api/v1/orders/checkout",
-        json={"items": [{"variant_id": variant_id, "quantity": 1}]},
+        json={"items": [{"variant_id": variant_id, "quantity": 1}], "fulfillment_option": "pickup"},
         headers={**buyer_headers, "Idempotency-Key": "e2e-stub-checkout-1"},
     )
     assert checkout_resp.status_code == 201
@@ -360,7 +361,7 @@ async def test_pay_on_delivery_marks_order_awaiting_approval(
     # 1. Checkout -> order in "pending" status
     checkout_resp = await client.post(
         "/api/v1/orders/checkout",
-        json={"items": [{"variant_id": variant_id, "quantity": 1}]},
+        json={"items": [{"variant_id": variant_id, "quantity": 1}], "fulfillment_option": "pickup"},
         headers={**buyer_headers, "Idempotency-Key": "e2e-pod-checkout-1"},
     )
     assert checkout_resp.status_code == 201, checkout_resp.text

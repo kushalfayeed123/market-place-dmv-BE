@@ -13,7 +13,7 @@
 | ORM / migrations | **SQLAlchemy 2.0 + Alembic** | Explicit schema control needed for the ledger's immutability constraints |
 | Database | **PostgreSQL 15+** | JSONB for flexible attributes, row-level security, triggers for ledger immutability |
 | Cache / rate limiting / queues | **Redis (Upstash)** | Sliding-window counters, idempotency locks, short-lived job queue |
-| Object storage | **Cloudflare R2** (S3-compatible) | Private bucket + signed URLs for digital assets |
+| Object storage | **AWS S3** (S3-compatible) | Private bucket + presigned URLs for digital assets, product images, and KYC documents |
 | Auth tokens | **JWT (access) + opaque hashed refresh tokens (DB)** | Short-lived access token, revocable refresh sessions |
 | Password hashing | **Argon2id** (via `passlib`) | Modern default, memory-hard |
 | Background jobs | **Redis Queue (RQ) or Celery-lite / APScheduler** | Payout auto-release, webhook retries, email sends |
@@ -225,7 +225,7 @@ CREATE TABLE digital_assets (
 
 -- ============ ORDERS & FULFILLMENT ============
 
-CREATE TYPE order_status AS ENUM ('pending', 'awaiting_approval', 'paid', 'partially_fulfilled', 'fulfilled', 'cancelled', 'refunded');
+CREATE TYPE order_status AS ENUM ('pending', 'awaiting_approval', 'accepted', 'paid', 'partially_fulfilled', 'shipped', 'fulfilled', 'cancelled', 'refunded');
 CREATE TYPE fulfillment_kind_order AS ENUM ('shipment', 'digital_delivery');
 CREATE TYPE fulfillment_status AS ENUM ('pending', 'shipped', 'delivered', 'delivered_digital', 'failed');
 
@@ -571,9 +571,10 @@ JWT_SECRET=change-me
 PAYSTACK_SECRET_KEY=sk_test_xxx        # Paystack TEST mode key
 PAYSTACK_PUBLIC_KEY=pk_test_xxx
 KYC_ENFORCEMENT_ENABLED=false          # off locally per earlier decision
-R2_BUCKET=marketplace-dev
-R2_ACCESS_KEY_ID=...
-R2_SECRET_ACCESS_KEY=...
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE  # required for S3 operations
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+AWS_REGION=eu-north-1
+S3_BUCKET=marketplace-dev
 ```
 
 ### 7.3 Migrations & seed data
@@ -611,17 +612,17 @@ This is the fastest way to exercise the full webhook → ledger → fulfillment 
 
 | Component | Free-tier choice | Notes |
 |---|---|---|
-| API (FastAPI) | **Render** free Web Service | Spins down after ~15 min idle → cold start on next request (acceptable for MVP/demo; mention to stakeholders). No persistent disk — fine, since all assets live in R2 and state lives in Postgres/Redis. |
+| API (FastAPI) | **Render** free Web Service | Spins down after ~15 min idle → cold start on next request (acceptable for MVP/demo; mention to stakeholders). No persistent disk — fine, since all assets live in S3 and state lives in Postgres/Redis. |
 | Database | **Neon** (or Supabase) free Postgres | Prefer over Render's free Postgres, which **expires after 90 days**. Neon's free tier is a persistent, always-available serverless Postgres — a better fit for anything beyond a demo. |
 | Redis | **Upstash** free tier | Already your standard choice; REST-based, works fine from Render. |
-| Object storage | **Cloudflare R2** free tier | 10GB storage / 1M Class A ops free — plenty for early digital assets + product images. |
+| Object storage | **AWS S3** free tier / MinIO | 5GB storage free; or MinIO (open-source S3) with a small Render persistent disk for full S3 compatibility. |
 | Frontend | **Vercel** free tier | See frontend design doc. |
 
 ### 8.1 Deployment steps (Render)
 
 1. Push repo to GitHub.
 2. Render → New Web Service → connect repo → set build command (`pip install -r requirements.txt`) and start command (`uvicorn app.main:app --host 0.0.0.0 --port $PORT`).
-3. Add environment variables in Render's dashboard (never commit `.env`) — `DATABASE_URL` (from Neon), `REDIS_URL` (from Upstash), `PAYSTACK_SECRET_KEY` (test key initially), `JWT_SECRET`, `R2_*`.
+3. Add environment variables in Render's dashboard (never commit `.env`) — `DATABASE_URL` (from Neon), `REDIS_URL` (from Upstash), `PAYSTACK_SECRET_KEY` (test key initially), `JWT_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET`.
 4. Add a **Render "Release Command"**: `alembic upgrade head` — runs migrations automatically on every deploy.
 5. Point Paystack's webhook URL (test mode) at `https://<your-render-app>.onrender.com/webhooks/paystack`.
 
@@ -668,9 +669,9 @@ Render auto-deploys on push to `main` once CI is green — no separate CD toolin
 | GET | `/catalog/products` | none | public browse |
 | POST | `/orders/checkout` | buyer | **requires Idempotency-Key** |
 | POST | `/orders/{id}/approve` | merchant_owner | pending\|awaiting_approval → paid; releases payout hold |
-| POST | `/orders/{id}/accept` | merchant_owner | paid → partially_fulfilled |
-| POST | `/orders/{id}/ship` | merchant_owner | paid\|partially_fulfilled → fulfilled |
-| POST | `/orders/{id}/cancel` | merchant_owner | pending\|paid\|partially_fulfilled → cancelled |
+| POST | \/orders/{id}/accept\ | merchant_owner | pending\\|awaiting_approval\\|paid → accepted |
+| POST | \/orders/{id}/ship\ | merchant_owner | paid\\|accepted → shipped; creates SHIPPED fulfillment + releases payout |
+| POST | \/orders/{id}/cancel\ | merchant_owner | pending\\|accepted\\|paid\\|partially_fulfilled → cancelled |
 | POST | `/webhooks/paystack` | signature | idempotent by event id |
 | POST | `/payments/{id}/refund` | platform_admin | **requires Idempotency-Key** |
 | GET | `/merchants/{id}/ledger` | merchant_owner (ownership) | read-only, derived balance view |

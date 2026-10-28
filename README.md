@@ -11,7 +11,7 @@ This is the backend service for the Marketplace Platform, built with FastAPI and
 - **Modular Architecture**: Organized by business domain (auth, catalog, orders, payments, etc.)
 - **Database**: PostgreSQL with SQLAlchemy ORM and Alembic migrations
 - **Caching**: Redis for rate limiting and idempotency keys
-- **Storage**: Cloudflare R2 for digital assets
+- **Storage**: AWS S3 for digital assets
 - **Payments**: Paystack integration with webhook handling
 - **Background Workers**: Payout auto-release, webhook processing
 
@@ -21,7 +21,7 @@ This is the backend service for the Marketplace Platform, built with FastAPI and
 - **ORM**: SQLAlchemy 2.0 + Alembic
 - **Database**: PostgreSQL 15+
 - **Cache/Queue**: Redis (Upstash)
-- **Object Storage**: Cloudflare R2 (S3-compatible)
+- **Object Storage**: AWS S3 (S3-compatible)
 - **Authentication**: JWT + opaque refresh tokens
 - **Password Hashing**: Argon2id
 - **Background Jobs**: Redis Queue or similar
@@ -244,7 +244,7 @@ The backend is designed to be deployed on free-tier services for MVP/demo:
 - **API**: Render free Web Service
 - **Database**: Neon free Postgres (preferred over Render's free Postgres)
 - **Redis**: Upstash free tier
-- **Object Storage**: Cloudflare R2 free tier
+- **Object Storage**: AWS S3 free tier / MinIO
 - **Frontend**: Vercel free tier
 
 See the system design document for detailed deployment instructions.
@@ -275,9 +275,9 @@ See the automatically generated API documentation at `/docs` or `/redoc` for com
 - `GET /api/v1/orders/{order_id}` - Get order details
 - `GET /api/v1/orders/` - List user's orders
 - `POST /api/v1/orders/{order_id}/approve` - Confirm payment (merchant; `pending`|`awaiting_approval` → `paid`)
-- `POST /api/v1/orders/{order_id}/accept` - Accept order (merchant; `paid` → `partially_fulfilled`)
-- `POST /api/v1/orders/{order_id}/ship` - Mark shipped (merchant; `paid`|`partially_fulfilled` → `fulfilled`)
-- `POST /api/v1/orders/{order_id}/cancel` - Cancel order (merchant; `pending`|`paid`|`partially_fulfilled` → `cancelled`)
+- `POST /api/v1/orders/{order_id}/accept` - Accept order (merchant; `pending`|`awaiting_approval`|`paid` → `accepted`)
+- `POST /api/v1/orders/{order_id}/ship` - Mark shipped (merchant; `paid`|`accepted` → `shipped`; creates SHIPPED fulfillment + releases payout; optional carrier/tracking)
+- `POST /api/v1/orders/{order_id}/cancel` - Cancel order (merchant; `pending`|`accepted`|`paid`|`partially_fulfilled` → `cancelled`)
 
 ### Payments
 - `POST /api/v1/payments/process` - Process payment (requires idempotency key)

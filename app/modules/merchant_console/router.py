@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -73,6 +73,7 @@ from app.schemas.merchant_console import (
     MerchantShipmentListItem,
     PayoutAccountStatusResponse,
     PayoutListItem,
+    ShipOrderRequest,
 )
 from app.schemas.merchants import KycReviewRequest, PayoutCreate, PayoutResponse
 
@@ -133,6 +134,7 @@ async def get_merchant_attention(
         .where(
             Order.status.in_(
                 [
+                    OrderStatus.ACCEPTED.value,
                     OrderStatus.PAID.value,
                     OrderStatus.PARTIALLY_FULFILLED.value,
                 ]
@@ -767,7 +769,12 @@ async def accept_order(
     current_user: User = get_current_active_user_depends,
     db: AsyncSession = get_db_depends,
 ):
-    """Accept an order — transitions paid → partially_fulfilled."""
+    """Accept an order — the first merchant action.
+
+    Transitions an order from 'pending', 'awaiting_approval', or 'paid' to
+    'accepted', signalling that the merchant will process it.  Payment is
+    confirmed in a separate step (POST /orders/{id}/approve).
+    """
     if not await _check_order_ownership(order_id, current_user, db):
         raise HTTPException(
             status_code=403, detail="Not authorized to manage this order"
@@ -775,12 +782,16 @@ async def accept_order(
     order = await db.get(Order, to_uuid(order_id))
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    if order.status != OrderStatus.PAID.value:
+    if order.status not in (
+        OrderStatus.PENDING.value,
+        OrderStatus.AWAITING_APPROVAL.value,
+        OrderStatus.PAID.value,
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"Order cannot be accepted from status '{order.status}'",
         )
-    order.status = OrderStatus.PARTIALLY_FULFILLED.value
+    order.status = OrderStatus.ACCEPTED.value
     await db.commit()
     await db.refresh(order)
     return {"ok": True, "order_id": order_id, "status": order.status}
@@ -791,8 +802,15 @@ async def ship_order(
     order_id: str,
     current_user: User = get_current_active_user_depends,
     db: AsyncSession = get_db_depends,
+    ship_data: ShipOrderRequest = Body(None),
 ):
-    """Mark an order as shipped — transitions to fulfilled."""
+    """Mark an order as shipped — transitions to shipped.
+
+    Creates a SHIPPED fulfillment (with optional carrier/tracking), releases
+    any held payout funds, and consumes the inventory reservation.  The order
+    moves to 'shipped'; it becomes 'fulfilled' when the fulfillment is later
+    marked delivered (POST /shipments/{id}/delivered).
+    """
     if not await _check_order_ownership(order_id, current_user, db):
         raise HTTPException(
             status_code=403, detail="Not authorized to manage this order"
@@ -801,8 +819,8 @@ async def ship_order(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     if order.status not in (
-        OrderStatus.PARTIALLY_FULFILLED.value,
         OrderStatus.PAID.value,
+        OrderStatus.ACCEPTED.value,
     ):
         raise HTTPException(
             status_code=400,
@@ -837,16 +855,16 @@ async def ship_order(
         net_total = sum(abs(i.line_total) for i in merchant_items)
         currency = merchant_items[0].currency
 
-        # 1) Persist a DELIVERED fulfillment so the order detail page's
-        #    delivery (fulfillments) section is populated for the merchant.
+        # 1) Persist a SHIPPED fulfillment with optional carrier/tracking.
         db.add(
             Fulfillment(
                 order_id=order.id,
                 merchant_id=merchant_id,
                 type=FulfillmentKindOrder.SHIPMENT.value,
                 delivery_method=DeliveryMethod.THIRD_PARTY.value,
-                status=FulfillmentStatus.DELIVERED.value,
-                delivered_at=datetime.now(tz=UTC),
+                status=FulfillmentStatus.SHIPPED.value,
+                carrier=ship_data.carrier if ship_data else None,
+                tracking_number=ship_data.tracking_number if ship_data else None,
             )
         )
 
@@ -924,8 +942,7 @@ async def ship_order(
                 if release:
                     inventory.quantity_reserved -= release
 
-    order.status = OrderStatus.FULFILLED.value
-    order.fulfilled_at = datetime.now(tz=UTC)
+    order.status = OrderStatus.SHIPPED.value
     await db.commit()
     await db.refresh(order)
     return {"ok": True, "order_id": order_id, "status": order.status}
@@ -939,7 +956,7 @@ async def cancel_order(
 ):
     """Cancel an order — transitions to cancelled.
 
-    Accepts 'pending' (unpaid cancel — no refund), 'paid', or
+    Accepts 'pending' (unpaid cancel — no refund), 'accepted', 'paid', or
     'partially_fulfilled'. A pending order has no captured funds, so this is a
     plain cancel with no refund.
     """
@@ -952,6 +969,7 @@ async def cancel_order(
         raise HTTPException(status_code=404, detail="Order not found")
     if order.status not in (
         OrderStatus.PENDING.value,
+        OrderStatus.ACCEPTED.value,
         OrderStatus.PAID.value,
         OrderStatus.PARTIALLY_FULFILLED.value,
     ):

@@ -292,6 +292,35 @@ async def update_status(
     return response_data
 
 
+@router.post("/{fulfillment_id}/delivered", response_model=FulfillmentResponse)
+async def deliver_fulfillment(
+    fulfillment_id: str,
+    current_user: dict = get_current_active_user_depends,
+    service: FulfillmentService = get_fulfillment_service_depends,
+):
+    """Mark a shipped fulfillment as delivered.
+
+    Transitions the fulfillment from 'shipped' to 'delivered', records the
+    delivery timestamp, and — if all fulfillments for the parent order are
+    now delivered — marks the order as 'fulfilled'.
+    """
+    # Buyers cannot mark fulfillments delivered
+    if current_user.role.value == "buyer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Buyers cannot mark fulfillments as delivered",
+        )
+
+    try:
+        response_data = await service.mark_delivered(fulfillment_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        )
+
+    return response_data
+
+
 # Include the router in the main app
 def get_router():
     return router

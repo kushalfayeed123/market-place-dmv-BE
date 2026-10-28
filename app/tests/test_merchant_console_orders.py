@@ -158,7 +158,7 @@ async def paid_order(
     # 1. Checkout
     co = await client.post(
         "/api/v1/orders/checkout",
-        json={"items": [{"variant_id": variant_id, "quantity": 1}]},
+        json={"items": [{"variant_id": variant_id, "quantity": 1}], "fulfillment_option": "pickup"},
         headers={**buyer_headers, "Idempotency-Key": "mc-checkout-1"},
     )
     assert co.status_code == 201, co.text
@@ -205,7 +205,7 @@ async def pending_order(
     # 1. Checkout -> order is 'pending'
     co = await client.post(
         "/api/v1/orders/checkout",
-        json={"items": [{"variant_id": variant_id, "quantity": 1}]},
+        json={"items": [{"variant_id": variant_id, "quantity": 1}], "fulfillment_option": "pickup"},
         headers={**buyer_headers, "Idempotency-Key": "mc-checkout-pending"},
     )
     assert co.status_code == 201, co.text
@@ -269,7 +269,7 @@ async def test_merchant_can_accept_order(
     paid_order: dict,
     merchant_setup: dict,
 ):
-    """Merchant owner accepts a paid order -> status becomes 'partially_fulfilled'."""
+    """Merchant owner accepts a paid order -> status becomes 'accepted'."""
     headers = {"Authorization": f"Bearer {merchant_owner_token}"}
     order_id = paid_order["order_id"]
 
@@ -280,7 +280,7 @@ async def test_merchant_can_accept_order(
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["ok"] is True
-    assert data["status"] == "partially_fulfilled"
+    assert data["status"] == "accepted"
 
     # Verify via GET order
     order_resp = await client.get(
@@ -288,7 +288,7 @@ async def test_merchant_can_accept_order(
         headers=headers,
     )
     assert order_resp.status_code == 200
-    assert order_resp.json()["status"] == "partially_fulfilled"
+    assert order_resp.json()["status"] == "accepted"
 
 
 @pytest.mark.asyncio
@@ -298,11 +298,11 @@ async def test_merchant_can_ship_order(
     paid_order: dict,
     merchant_setup: dict,
 ):
-    """Merchant owner ships an order -> status becomes 'fulfilled'."""
+    """Merchant owner ships an order -> status becomes 'shipped'."""
     headers = {"Authorization": f"Bearer {merchant_owner_token}"}
     order_id = paid_order["order_id"]
 
-    # Ship directly from 'paid' (ship_order allows paid OR partially_fulfilled)
+    # Ship directly from 'paid'
     resp = await client.post(
         f"/api/v1/orders/{order_id}/ship",
         headers=headers,
@@ -310,14 +310,14 @@ async def test_merchant_can_ship_order(
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["ok"] is True
-    assert data["status"] == "fulfilled"
+    assert data["status"] == "shipped"
 
     order_resp = await client.get(
         f"/api/v1/orders/{order_id}",
         headers=headers,
     )
     assert order_resp.status_code == 200
-    assert order_resp.json()["status"] == "fulfilled"
+    assert order_resp.json()["status"] == "shipped"
 
 
 @pytest.mark.asyncio
@@ -327,19 +327,19 @@ async def test_merchant_can_accept_then_ship(
     paid_order: dict,
     merchant_setup: dict,
 ):
-    """Full flow: accept (paid -> partially_fulfilled) then ship (-> fulfilled)."""
+    """Full flow: accept (paid -> accepted) then ship (-> shipped)."""
     headers = {"Authorization": f"Bearer {merchant_owner_token}"}
     order_id = paid_order["order_id"]
 
     # Accept
     acc = await client.post(f"/api/v1/orders/{order_id}/accept", headers=headers)
     assert acc.status_code == 200, acc.text
-    assert acc.json()["status"] == "partially_fulfilled"
+    assert acc.json()["status"] == "accepted"
 
     # Ship
     ship = await client.post(f"/api/v1/orders/{order_id}/ship", headers=headers)
     assert ship.status_code == 200, ship.text
-    assert ship.json()["status"] == "fulfilled"
+    assert ship.json()["status"] == "shipped"
 
 
 @pytest.mark.asyncio
@@ -478,7 +478,7 @@ async def test_merchant_cannot_accept_already_accepted(
     acc1 = await client.post(f"/api/v1/orders/{order_id}/accept", headers=headers)
     assert acc1.status_code == 200, acc1.text
 
-    # Second accept should fail (status is now partially_fulfilled, not paid)
+    # Second accept should fail (status is now accepted, not pending)
     acc2 = await client.post(f"/api/v1/orders/{order_id}/accept", headers=headers)
     assert acc2.status_code == 400, acc2.text
 
@@ -632,9 +632,9 @@ async def test_full_merchant_dashboard_flow(
     2. GET /merchants/by-owner/{user_id} → load merchant for the dashboard
     3. GET /merchants/{id}/attention → verify one order needs fulfilment
     4. GET /merchants/{id}/orders → verify order status is 'paid'
-    5. POST /orders/{id}/accept → status becomes 'partially_fulfilled'
-    6. POST /orders/{id}/ship → status becomes 'fulfilled'
-    7. GET /merchants/{id}/orders → verify status is now 'fulfilled'
+    5. POST /orders/{id}/accept → status becomes 'accepted'
+    6. POST /orders/{id}/ship → status becomes 'shipped'
+    7. GET /merchants/{id}/orders → verify status is now 'shipped'
     8. GET /merchants/{id}/attention → verify orders_to_fulfil is now 0
     """
     # 1. Login
@@ -681,32 +681,32 @@ async def test_full_merchant_dashboard_flow(
     assert orders[0]["status"] == "paid"
     order_id = orders[0]["id"]
 
-    # 5. Accept order (paid -> partially_fulfilled)
+    # 5. Accept order (paid -> accepted)
     resp = await client.post(
         f"/api/v1/orders/{order_id}/accept",
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "partially_fulfilled"
+    assert resp.json()["status"] == "accepted"
 
-    # 6. Ship order (partially_fulfilled -> fulfilled)
+    # 6. Ship order (accepted -> shipped)
     resp = await client.post(
         f"/api/v1/orders/{order_id}/ship",
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "fulfilled"
+    assert resp.json()["status"] == "shipped"
 
-    # 7. Verify order is fulfilled
+    # 7. Verify order is shipped
     resp = await client.get(
         f"/api/v1/merchants/{merchant_setup['merchant_id']}/orders",
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
     orders = resp.json()
-    assert orders[0]["status"] == "fulfilled"
+    assert orders[0]["status"] == "shipped"
 
-    # 8. Attention count should be 0 (order is now fulfilled)
+    # 8. Attention count should be 0 (order is now shipped)
     resp = await client.get(
         f"/api/v1/merchants/{merchant_setup['merchant_id']}/attention",
         headers=headers,
@@ -768,7 +768,7 @@ async def test_ship_records_fulfillment_and_payout_release(
 ):
     """Shipping (completing & delivering) an order must:
 
-    * create a DELIVERED fulfillment so the order detail page's delivery
+    * create a SHIPPED fulfillment so the order detail page's delivery
       section is populated, and
     * record the group-g2 ``payout_release`` ledger entry on delivery
       confirmation (the merchant's held funds move to payout-eligible).
@@ -796,25 +796,25 @@ async def test_ship_records_fulfillment_and_payout_release(
     )
     assert before == []
 
-    # Ship == completed & delivered.
+    # Ship creates a SHIPPED fulfillment and releases payout.
     resp = await client.post(f"/api/v1/orders/{order_id}/ship", headers=headers)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "fulfilled"
+    assert resp.json()["status"] == "shipped"
 
-    # The detail endpoint now surfaces the delivery in the fulfillments list and
-    # carries a fulfilled_at timestamp (the "delivery section" used to be empty).
+    # The detail endpoint now surfaces the fulfillment in the fulfillments list.
     detail = await client.get(
         f"/api/v1/merchants/{merchant_id}/orders/{order_id}",
         headers=headers,
     )
     assert detail.status_code == 200, detail.text
     body = detail.json()
-    assert body["status"] == "fulfilled"
-    assert body["fulfilled_at"] is not None
+    assert body["status"] == "shipped"
+    assert body["fulfilled_at"] is None  # fulfilled_at is set when delivered, not shipped
     assert len(body["fulfillments"]) == 1
     ff = body["fulfillments"][0]
-    assert ff["status"] == "delivered"
-    assert ff["delivered_at"] is not None
+    assert ff["status"] == "shipped"
+    assert ff["carrier"] is None
+    assert ff["tracking_number"] is None
 
     # A payout_release ledger transaction was recorded on delivery confirmation.
     rows = (
@@ -960,10 +960,10 @@ async def test_ship_consumes_inventory_reservation_for_tracked_variant(
     assert login.status_code == 200, login.text
     headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
 
-    # Fulfillment trigger: paid -> fulfilled.
+    # Fulfillment trigger: paid -> shipped.
     ship = await client.post(f"/api/v1/orders/{order.id}/ship", headers=headers)
     assert ship.status_code == 200, ship.text
-    assert ship.json()["status"] == "fulfilled"
+    assert ship.json()["status"] == "shipped"
 
     # The checkout reservation is consumed; `available` (already reduced at
     # checkout) is unchanged -- the sale is reflected exactly once.
@@ -972,3 +972,97 @@ async def test_ship_consumes_inventory_reservation_for_tracked_variant(
     ).scalar_one()
     assert inv_after.quantity_reserved == 0
     assert inv_after.quantity_available == 8
+
+
+@pytest.mark.asyncio
+async def test_deliver_marks_fulfillment_delivered_and_order_fulfilled(
+    client: AsyncClient,
+    db,
+    merchant_setup: dict,
+    paid_order: dict,
+    merchant_owner_token: str,
+):
+    """Shipping then delivering an order must:
+
+    * create a SHIPPED fulfillment on ship, then
+    * transition that fulfillment to DELIVERED via the
+      ``POST /fulfillment/{id}/delivered`` endpoint, and
+    * mark the parent order as 'fulfilled' (with ``fulfilled_at`` set)
+      once all its fulfillments are delivered.
+
+    Regression: previously ``ship_order`` jumped straight to ``fulfilled``
+    and no separate delivery step existed.  The new two-step model keeps
+    shipping and delivery as distinct events.
+    """
+    from app.models.fulfillment import Fulfillment
+
+    headers = {"Authorization": f"Bearer {merchant_owner_token}"}
+    order_id = paid_order["order_id"]
+
+    # Step 1 – ship the order (creates a SHIPPED fulfillment)
+    ship = await client.post(f"/api/v1/orders/{order_id}/ship", headers=headers)
+    assert ship.status_code == 200, ship.text
+    assert ship.json()["status"] == "shipped"
+
+    # Retrieve the fulfillment ID created by ship_order
+    ff_rows = (
+        await db.execute(
+            select(Fulfillment).where(Fulfillment.order_id == to_uuid(order_id))
+        )
+    ).scalars().all()
+    assert len(ff_rows) == 1
+    fulfillment_id = str(ff_rows[0].id)
+
+    # Step 2 – mark the fulfillment as delivered
+    resp = await client.post(
+        f"/api/v1/fulfillment/{fulfillment_id}/delivered",
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "delivered"
+    assert body["delivered_at"] is not None  # timestamp set on delivery
+
+    # Step 3 – the parent order is now 'fulfilled'
+    order_resp = await client.get(
+        f"/api/v1/merchants/{merchant_setup['merchant_id']}/orders/{order_id}",
+        headers=headers,
+    )
+    assert order_resp.status_code == 200, order_resp.text
+    order_body = order_resp.json()
+    assert order_body["status"] == "fulfilled"
+    assert order_body["fulfilled_at"] is not None  # set on delivery
+
+
+@pytest.mark.asyncio
+async def test_deliver_requires_shipped_status(
+    client: AsyncClient,
+    db,
+    merchant_setup: dict,
+    paid_order: dict,
+    merchant_owner_token: str,
+):
+    """The deliver endpoint must reject fulfillments that are not in 'shipped'."""
+    from app.models.fulfillment import Fulfillment
+
+    headers = {"Authorization": f"Bearer {merchant_owner_token}"}
+    order_id = paid_order["order_id"]
+
+    # Create a fulfillment in PENDING status directly (not shipped)
+    fulfillment = Fulfillment(
+        order_id=to_uuid(order_id),
+        merchant_id=to_uuid(merchant_setup["merchant_id"]),
+        type="shipment",
+        delivery_method="third_party",
+        status="pending",
+    )
+    db.add(fulfillment)
+    await db.commit()
+    await db.refresh(fulfillment)
+
+    resp = await client.post(
+        f"/api/v1/fulfillment/{fulfillment.id}/delivered",
+        headers=headers,
+    )
+    assert resp.status_code == 404, resp.text
+    assert "shipped" in resp.json()["detail"].lower()

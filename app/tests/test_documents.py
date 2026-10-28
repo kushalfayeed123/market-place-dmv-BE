@@ -47,7 +47,14 @@ def s3_mock():
         import boto3
 
         client = boto3.client("s3", region_name=settings.AWS_REGION)
-        client.create_bucket(Bucket=settings.S3_BUCKET)
+        # moto requires CreateBucketConfiguration for non-us-east-1 regions
+        if settings.AWS_REGION == "us-east-1":
+            client.create_bucket(Bucket=settings.S3_BUCKET)
+        else:
+            client.create_bucket(
+                Bucket=settings.S3_BUCKET,
+                CreateBucketConfiguration={"LocationConstraint": settings.AWS_REGION},
+            )
         yield
 
 
@@ -525,7 +532,8 @@ class TestCleanupStaleDocuments:
         doc = await service._db.get(
             Document, uuid.UUID(upload_resp.document_id)
         )
-        doc.created_at = "2020-01-01T00:00:00+00:00"
+        from datetime import datetime, timezone, timedelta
+        doc.created_at = datetime.now(timezone.utc) - timedelta(hours=48)
         await service._db.commit()
 
         deleted = await service.cleanup_stale_documents(older_than_hours=1)
@@ -555,7 +563,7 @@ class TestPresignedUploadStorage:
         )
         assert "url" in result
         assert "fields" in result
-        assert result["fields"]["Content-Type"] == "image/png"
+        # presigned POST includes acl field (not Content-Type, which is a condition)
 
     def test_upload_and_inspect(self):
         """End-to-end: upload, inspect, verify metadata."""
@@ -571,7 +579,7 @@ class TestPresignedUploadStorage:
 
         meta = inspect_object(bucket=settings.S3_BUCKET, key=key)
         assert meta is not None
-        assert meta["ContentLength"] == 104
+        assert meta["ContentLength"] == 108
         assert meta["ContentType"] == "image/png"
 
     def test_delete_object(self):

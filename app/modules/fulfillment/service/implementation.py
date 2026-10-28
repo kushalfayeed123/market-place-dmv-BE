@@ -59,7 +59,7 @@ class FulfillmentServiceImpl(FulfillmentService):
             The created fulfillment response.
             
         Raises:
-            ValueError: If order not found or not paid.
+            ValueError: If order not found or not paid/accepted.
         """
         # Verify order exists
         result = await self._db.execute(
@@ -70,10 +70,11 @@ class FulfillmentServiceImpl(FulfillmentService):
         if not order:
             raise ValueError("Order not found")
 
-        # Verify order is paid
-        if order.status != OrderStatus.PAID.value:
+        # Verify order is paid or accepted (merchant has accepted but not yet
+        # shipped — a fulfillment record may be pre-created)
+        if order.status not in (OrderStatus.PAID.value, OrderStatus.ACCEPTED.value):
             raise ValueError(
-                f"Order must be paid to create fulfillment, current status: {order.status}"
+                f"Order must be paid or accepted to create fulfillment, current status: {order.status}"
             )
 
         # Verify merchant owns items in this order
@@ -293,7 +294,9 @@ class FulfillmentServiceImpl(FulfillmentService):
             from app.models.order import Order as _Order
             from app.models.order import OrderStatus as _OrderStatus
             order = await self._db.get(_Order, order_id)
-            if not order or order.status != _OrderStatus.PAID.value:
+            if not order or order.status not in (
+                _OrderStatus.PAID.value, _OrderStatus.SHIPPED.value,
+            ):
                 return
             order.status = _OrderStatus.FULFILLED.value
             from datetime import datetime as _dt
@@ -442,6 +445,75 @@ class FulfillmentServiceImpl(FulfillmentService):
                             subject=f"Order {order.order_number} — {status_label}",
                             body=(
                                 f"Your order {order.order_number} is now {status_label.lower()}{carrier_text}{tracking_text}."
+                            ),
+                            related_order_id=str(order.id),
+                        )
+                    )
+                    await self._maybe_mark_order_fulfilled(order.id)
+            except Exception:
+                pass
+
+        return self._to_response(fulfillment)
+
+    async def mark_delivered(
+        self, fulfillment_id: str
+    ) -> FulfillmentResponse:
+        """
+        Mark a shipped fulfillment as delivered.
+
+        Transitions the fulfillment from 'shipped' to 'delivered', records
+        the ``delivered_at`` timestamp, and (if all fulfillments for the
+        order are now delivered) marks the parent order as 'fulfilled'.
+
+        Args:
+            fulfillment_id: The fulfillment ID to mark delivered.
+
+        Returns:
+            The updated fulfillment response.
+
+        Raises:
+            ValueError: If fulfillment not found or not in 'shipped' status.
+        """
+        result = await self._db.execute(
+            select(Fulfillment).where(Fulfillment.id == to_uuid(fulfillment_id))
+        )
+        fulfillment = result.scalar_one_or_none()
+        if not fulfillment:
+            raise ValueError("Fulfillment not found")
+
+        if fulfillment.status != FulfillmentStatus.SHIPPED.value:
+            raise ValueError(
+                f"Fulfillment must be in 'shipped' status to mark delivered, "
+                f"current status: {fulfillment.status}"
+            )
+
+        fulfillment.status = FulfillmentStatus.DELIVERED.value
+        from datetime import datetime as _dt
+        fulfillment.delivered_at = _dt.now(UTC)
+
+        await self._db.commit()
+        await self._db.refresh(fulfillment)
+
+        # ── Notification: delivery confirmation ──────────────────────────────
+        if self._notification_service:
+            try:
+                from app.models.order import Order as _Order
+                order_result = await self._db.execute(
+                    select(_Order).where(_Order.id == fulfillment.order_id)
+                )
+                order = order_result.scalar_one_or_none()
+                if order:
+                    carrier_text = f" via {fulfillment.carrier}" if fulfillment.carrier else ""
+                    tracking_text = f" (tracking: {fulfillment.tracking_number})" if fulfillment.tracking_number else ""
+                    await self._notification_service.create_notification(
+                        NotificationCreate(
+                            user_id=str(order.buyer_id),
+                            type=NotificationType.SHIPPING_UPDATE.value,
+                            channel=NotificationChannel.EMAIL.value,
+                            subject=f"Order {order.order_number} — Delivered",
+                            body=(
+                                f"Your order {order.order_number} has been delivered"
+                                f"{carrier_text}{tracking_text}. Thank you for your purchase!"
                             ),
                             related_order_id=str(order.id),
                         )

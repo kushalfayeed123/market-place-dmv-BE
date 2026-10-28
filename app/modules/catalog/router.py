@@ -36,7 +36,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 router = APIRouter()
 
 # Local filesystem backing for product image uploads. Served via StaticFiles mounted
-# at /uploads in app/main.py. Production should swap this for Cloudflare R2.
+# at /uploads in app/main.py. For production, replace with S3-backed storage by
+# switching this endpoint to use the documents subsystem's presigned upload flow.
 UPLOAD_DIR = Path(__file__).resolve().parents[3] / "static" / "uploads" / "products"
 
 # Module-level dependency singletons (avoids B008 function calls in argument defaults)

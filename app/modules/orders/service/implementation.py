@@ -138,6 +138,16 @@ class OrderServiceImpl(OrderService):
                 "line_total": line_total,
             })
 
+        # Ensure delivery address is present for delivery orders.
+        # If fulfillment_option is "delivery" or unspecified (delivery is the
+        # default for physical products), the buyer must supply a delivery
+        # address so the merchant can complete the delivery.
+        fulfillment_option = checkout_data.fulfillment_option
+        if fulfillment_option != "pickup" and not checkout_data.delivery_address:
+            raise ValueError(
+                "delivery_address is required when fulfillment_option is 'delivery'"
+            )
+
         # Create order
         new_order = Order(
             buyer_id=to_uuid(buyer_id),
@@ -513,9 +523,10 @@ class OrderServiceImpl(OrderService):
     ) -> OrderApprovalResponse:
         """Merchant confirms payment for an order, moving it to 'paid'.
 
-        Accepts an order in 'pending' (online payment awaiting webhook
-        confirmation) or 'awaiting_approval' (proof-of-payment on file); in
-        both cases the merchant is confirming payment has been received.
+        Accepts an order in 'accepted' (merchant has accepted but payment
+        not yet confirmed) or 'pending'/'awaiting_approval' (online payment
+        awaiting webhook confirmation or proof-of-payment on file); in
+        all cases the merchant is confirming payment has been received.
         """
         result = await self._db.execute(
             select(Order).where(Order.id == to_uuid(order_id))
@@ -536,6 +547,7 @@ class OrderServiceImpl(OrderService):
             raise ValueError("Not authorized to approve this order")
 
         if order.status not in (
+            OrderStatus.ACCEPTED.value,
             OrderStatus.PENDING.value,
             OrderStatus.AWAITING_APPROVAL.value,
         ):
@@ -627,9 +639,10 @@ class OrderServiceImpl(OrderService):
         """
         Merchant marks an order fully fulfilled (all items delivered).
 
-        Verifies the merchant owns items in the order, that the order is paid,
-        and that all related fulfillments are in a delivered state before
-        transitioning the order to 'fulfilled'.
+        Verifies the merchant owns items in the order, that the order is in
+        'paid', 'accepted', or 'shipped' status, and that all related
+        fulfillments are in a delivered state before transitioning the order
+        to 'fulfilled'.
 
         Args:
             order_id: The order ID.
@@ -641,7 +654,8 @@ class OrderServiceImpl(OrderService):
 
         Raises:
             ValueError: If the order is not found, not owned by the merchant,
-                        not paid, or not all fulfillments are delivered.
+                        not in a fulfillable status, or not all fulfillments
+                        are delivered.
         """
         result = await self._db.execute(
             select(Order).where(Order.id == to_uuid(order_id))
@@ -661,7 +675,11 @@ class OrderServiceImpl(OrderService):
         if not merchant_items:
             raise ValueError("Not authorized to fulfill this order")
 
-        if order.status not in (OrderStatus.PAID.value, OrderStatus.PARTIALLY_FULFILLED.value):
+        if order.status not in (
+            OrderStatus.PAID.value,
+            OrderStatus.ACCEPTED.value,
+            OrderStatus.SHIPPED.value,
+        ):
             raise ValueError(
                 f"Order cannot be fulfilled in status '{order.status}'"
             )
@@ -686,11 +704,10 @@ class OrderServiceImpl(OrderService):
                 f"Cannot fulfill order: {len(undelivered)} fulfillment(s) not yet delivered"
             )
 
-        # Transition order status
-        if order.status == OrderStatus.PARTIALLY_FULFILLED.value:
-            order.status = OrderStatus.FULFILLED.value
-        else:
-            order.status = OrderStatus.FULFILLED.value
+        # Transition order status — all fulfillments delivered, so mark the
+        # order as fully fulfilled regardless of whether it was accepted,
+        # shipped, or (legacy) partially_fulfilled.
+        order.status = OrderStatus.FULFILLED.value
         order.fulfilled_at = datetime.now(UTC)
         if fulfillment_summary:
             order.fulfillment_summary = fulfillment_summary
