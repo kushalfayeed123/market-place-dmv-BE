@@ -27,6 +27,15 @@ class PaymentInitResult:
     status: str = "initialized"
 
 
+@dataclass(frozen=True)
+class PaymentVerificationResult:
+    """Verified transaction details returned by a payment provider."""
+
+    status: str
+    amount: int
+    currency: str
+
+
 # ── Enum-like constants (kept as plain strings for DB / JSON compat) ─────────
 
 class PaymentStatus:
@@ -74,3 +83,9 @@ class PaymentProvider(abc.ABC):
     async def verify_transaction(self, provider_reference: str) -> bool:
         """Return ``True`` if the transaction was successful on the provider."""
         ...
+
+    async def verify_transaction_details(
+        self, provider_reference: str
+    ) -> PaymentVerificationResult | None:
+        """Return verified transaction details when the provider supports it."""
+        return None

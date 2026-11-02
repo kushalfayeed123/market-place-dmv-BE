@@ -1,12 +1,7 @@
 # app/models/notification.py
 """
-Notification model — platform messages (emails, SMS, push) that are recorded
-before being "sent" by a background worker.
-
-Since the email service is not yet implemented, notifications are written to
-this table (status=pending) and a background worker (`notification_worker.py`)
-flips them to status=sent and records a provider_reference, simulating the
-send. This keeps the purchase→confirmation flow end-to-end testable.
+Notification model — platform messages (email, SMS, push, and in-app) persisted
+before a background worker dispatches them through configured channel providers.
 """
 
 from datetime import datetime
@@ -30,6 +25,7 @@ class NotificationChannel(PyEnum):
     EMAIL = "email"
     SMS = "sms"
     PUSH = "push"
+    IN_APP = "in_app"
 
 
 class NotificationStatus(PyEnum):

@@ -11,6 +11,7 @@ in the registry with ``implemented=False`` so the frontend can grey them out.
 from app.modules.payments.providers.base import (
     PaymentProvider,
     PaymentInitResult,
+    PaymentVerificationResult,
     PaymentStatus,
 )
 from app.modules.payments.providers.paystack import PaystackProvider
@@ -24,6 +25,7 @@ from app.modules.payments.providers.registry import (
 __all__ = [
     "PaymentProvider",
     "PaymentInitResult",
+    "PaymentVerificationResult",
     "PaymentStatus",
     "PaystackProvider",
     "PaymentProviderRegistry",

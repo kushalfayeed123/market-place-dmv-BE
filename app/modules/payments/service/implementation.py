@@ -27,7 +27,7 @@ from app.schemas.payments import (
     RefundResponse,
     WebhookResponse,
 )
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -80,6 +80,37 @@ class PaymentServiceImpl(PaymentService):
             raise ValueError("Not authorized to pay for this order")
 
         provider_key = payment_data.provider
+
+        if provider_key != "pay_on_delivery":
+            existing_result = await self._db.execute(
+                select(PaymentTransaction)
+                .where(
+                    PaymentTransaction.order_id == order.id,
+                    PaymentTransaction.status.in_(("success", "initialized")),
+                )
+                .order_by(
+                    case(
+                        (PaymentTransaction.status == "success", 0),
+                        else_=1,
+                    ),
+                    PaymentTransaction.created_at.desc(),
+                )
+                .limit(1)
+            )
+            existing_payment = existing_result.scalar_one_or_none()
+            if existing_payment is not None:
+                return PaymentResponse(
+                    id=str(existing_payment.id),
+                    order_id=str(existing_payment.order_id),
+                    provider=existing_payment.provider,
+                    provider_reference=existing_payment.provider_reference,
+                    status=existing_payment.status,
+                    amount=existing_payment.amount,
+                    currency=existing_payment.currency,
+                    created_at=existing_payment.created_at,
+                    payment_url=existing_payment.payment_url,
+                    payment_method=None,
+                )
 
         # ── Pay on Delivery (merchant-confirmed) ──────────────────────────
         # No online provider is involved.  The order is placed into
@@ -241,7 +272,14 @@ class PaymentServiceImpl(PaymentService):
         result = await self._db.execute(
             select(PaymentTransaction)
             .where(PaymentTransaction.order_id == to_uuid(order_id))
-            .order_by(PaymentTransaction.created_at.desc())
+            .order_by(
+                case(
+                    (PaymentTransaction.status == "refunded", 0),
+                    (PaymentTransaction.status == "success", 1),
+                    else_=2,
+                ),
+                PaymentTransaction.created_at.desc(),
+            )
             .limit(1)
         )
         payment = result.scalar_one_or_none()
@@ -260,6 +298,73 @@ class PaymentServiceImpl(PaymentService):
             created_at=payment.created_at,
             payment_url=payment.payment_url,
             payment_method="pay_on_delivery" if payment.provider == "pay_on_delivery" else None,
+        )
+
+    async def verify_payment_by_order(
+        self, order_id: str, user_id: str
+    ) -> PaymentResponse | None:
+        """Verify and persist a pending provider payment for its buyer."""
+        order_result = await self._db.execute(
+            select(Order).where(Order.id == to_uuid(order_id))
+        )
+        order = order_result.scalar_one_or_none()
+        if order is None:
+            raise ValueError("Order not found")
+        if order.buyer_id != to_uuid(user_id):
+            raise ValueError("Not authorized to verify this order's payment")
+
+        payment_result = await self._db.execute(
+            select(PaymentTransaction)
+            .where(
+                PaymentTransaction.order_id == order.id,
+                PaymentTransaction.status == "initialized",
+                PaymentTransaction.provider == "paystack",
+            )
+            .order_by(PaymentTransaction.created_at.desc())
+            .limit(1)
+        )
+        payment = payment_result.scalar_one_or_none()
+        if payment is None:
+            return await self.get_payment_by_order(order_id, user_id)
+
+        provider = get_provider(payment.provider)
+        if provider is None:
+            raise ValueError(f"Payment provider '{payment.provider}' is unavailable")
+        verification = await provider.verify_transaction_details(
+            payment.provider_reference
+        )
+        if verification is None:
+            return await self.get_payment_by_order(order_id, user_id)
+
+        if verification.status == "success":
+            if (
+                verification.amount != payment.amount
+                or verification.currency.upper() != payment.currency.upper()
+            ):
+                raise ValueError(
+                    "Provider payment amount or currency does not match the order."
+                )
+            payment.status = "success"
+            if order.status == OrderStatus.PENDING.value:
+                order.status = OrderStatus.PAID.value
+        elif verification.status == "failed":
+            payment.status = "failed"
+
+        if payment.status in ("success", "failed"):
+            await self._db.commit()
+            await self._db.refresh(payment)
+
+        return PaymentResponse(
+            id=str(payment.id),
+            order_id=str(payment.order_id),
+            provider=payment.provider,
+            provider_reference=payment.provider_reference,
+            status=payment.status,
+            amount=payment.amount,
+            currency=payment.currency,
+            created_at=payment.created_at,
+            payment_url=payment.payment_url,
+            payment_method=None,
         )
 
     async def list_payments(

@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 
+from app.models.user import Gender, User
 from app.models.notification import (
     NotificationStatus,
     NotificationType,
@@ -189,6 +190,53 @@ async def test_list_pending_for_worker_claims(notif_service):
 
     still_pending = await notif_service.list_pending_for_worker(limit=100)
     assert len(still_pending) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_recipient_address_for_email_and_sms(notif_service, db):
+    """Worker recipient lookup uses the user's channel-specific contact."""
+    user_id = uuid.uuid4()
+    db.add(User(
+        id=user_id,
+        email="worker-recipient@example.com",
+        phone="+15555550123",
+        password_hash="test-hash",
+        gender=Gender.UNSET,
+    ))
+    await db.commit()
+    notification = NotificationCreate(
+        user_id=str(user_id),
+        type=NotificationType.ORDER_CONFIRMATION.value,
+        channel="email",
+        subject="Order confirmed",
+        body="Your order has been placed.",
+    )
+    created = await notif_service.create_notification(notification)
+
+    assert (
+        await notif_service.get_recipient_address(created)
+        == "worker-recipient@example.com"
+    )
+    created.channel = "sms"
+    assert await notif_service.get_recipient_address(created) == "+15555550123"
+
+
+@pytest.mark.asyncio
+async def test_mark_failed_only_transitions_sending_notifications(notif_service):
+    """A failed provider attempt is persisted and cannot be failed twice."""
+    created = await notif_service.create_notification(NotificationCreate(
+        user_id=TEST_USER_ID,
+        type=NotificationType.ORDER_CONFIRMATION.value,
+        status=NotificationStatus.SENDING.value,
+        subject="Order confirmed",
+        body="Body",
+    ))
+
+    assert await notif_service.mark_failed(created.id) is True
+    failed = await notif_service.get_notification(created.id)
+    assert failed is not None
+    assert failed.status == NotificationStatus.FAILED.value
+    assert await notif_service.mark_failed(created.id) is False
 
 
 @pytest.mark.asyncio

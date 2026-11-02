@@ -117,6 +117,7 @@ class CatalogService(ABC):
         merchant_id: str | None = None,
         category_id: str | None = None,
         status: str | None = None,
+        product_type: str | None = None,
         search_query: str | None = None,
         price_min: int | None = None,
         price_max: int | None = None,

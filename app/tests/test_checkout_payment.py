@@ -19,8 +19,11 @@ from app.models.enums import InventoryPolicy
 from app.models.merchant import KycStatus, Merchant
 from app.models.product import FulfillmentKind, Product, ProductStatus
 from app.models.product_variant import ProductVariant
+from app.models.payment_transaction import PaymentTransaction
 from app.models.store import Store
 from app.models.user import Gender, User, UserRole
+from app.modules.payments.providers.base import PaymentInitResult, PaymentVerificationResult
+from app.modules.payments.providers.paystack import PaystackProvider
 from httpx import AsyncClient
 
 
@@ -153,6 +156,40 @@ async def test_checkout_creates_order(
 
 
 @pytest.mark.asyncio
+async def test_physical_checkout_requires_delivery_address(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict
+):
+    response = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": seed_data["variant_id"], "quantity": 1}]},
+        headers={**buyer_headers, "Idempotency-Key": "physical-address-required"},
+    )
+    assert response.status_code == 400
+    assert "delivery_address is required" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_digital_checkout_does_not_require_delivery_address(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict, db
+):
+    from sqlalchemy import update
+
+    await db.execute(
+        update(Product)
+        .where(Product.id == uuid.UUID(seed_data["product_id"]))
+        .values(fulfillment_type="digital")
+    )
+    await db.commit()
+
+    response = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": seed_data["variant_id"], "quantity": 1}]},
+        headers={**buyer_headers, "Idempotency-Key": "digital-no-address"},
+    )
+    assert response.status_code == 201, response.text
+
+
+@pytest.mark.asyncio
 async def test_process_payment_initializes_transaction(
     client: AsyncClient, buyer_headers: dict, seed_data: dict
 ):
@@ -178,6 +215,81 @@ async def test_process_payment_initializes_transaction(
     assert payment["provider"] == "paystack"
     assert payment["status"] == "initialized"
 
+    repeated = await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": order_id, "provider": "paystack"},
+        headers={**buyer_headers, "Idempotency-Key": "e2e-pay-repeated"},
+    )
+    assert repeated.status_code == 201
+    assert repeated.json()["id"] == payment["id"]
+
+
+@pytest.mark.asyncio
+async def test_payment_verification_confirms_success_and_wins_over_stale_attempt(
+    client: AsyncClient,
+    buyer_headers: dict,
+    seed_data: dict,
+    db,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def initialize(self, order_id, amount, currency, **kwargs):
+        return PaymentInitResult(
+            provider_reference="verify-success-reference",
+            payment_url="https://pay.example/verify",
+        )
+
+    async def verify(self, provider_reference):
+        assert provider_reference == "verify-success-reference"
+        return PaymentVerificationResult(status="success", amount=10000, currency="NGN")
+
+    monkeypatch.setattr(PaystackProvider, "initialize_transaction", initialize)
+    monkeypatch.setattr(PaystackProvider, "verify_transaction_details", verify)
+
+    checkout = await client.post(
+        "/api/v1/orders/checkout",
+        json={
+            "items": [{"variant_id": seed_data["variant_id"], "quantity": 1}],
+            "fulfillment_option": "pickup",
+        },
+        headers={**buyer_headers, "Idempotency-Key": "verify-success-checkout"},
+    )
+    assert checkout.status_code == 201
+    order_id = checkout.json()["id"]
+
+    payment_resp = await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": order_id, "provider": "paystack"},
+        headers={**buyer_headers, "Idempotency-Key": "verify-success-init"},
+    )
+    assert payment_resp.status_code == 201
+    assert payment_resp.json()["status"] == "initialized"
+
+    verified = await client.post(
+        f"/api/v1/payments/order/{order_id}/verify",
+        headers=buyer_headers,
+        json={},
+    )
+    assert verified.status_code == 200
+    assert verified.json()["status"] == "success"
+
+    db.add(
+        PaymentTransaction(
+            order_id=uuid.UUID(order_id),
+            provider="paystack",
+            provider_reference="later-initialized-attempt",
+            status="initialized",
+            amount=10000,
+            currency="NGN",
+            payment_url="https://pay.example/later",
+        )
+    )
+    await db.commit()
+    latest = await client.get(
+        f"/api/v1/payments/order/{order_id}",
+        headers=buyer_headers,
+    )
+    assert latest.status_code == 200
+    assert latest.json()["status"] == "success"
 
 @pytest.mark.asyncio
 async def test_webhook_updates_payment_and_order_status(

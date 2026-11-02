@@ -15,8 +15,10 @@ import uuid
 
 import pytest
 from moto import mock_aws
+from sqlalchemy import select
 
 from app.core.config import settings
+from app.core.security import get_current_active_user
 from app.core.storage import (
     build_key,
     delete_object,
@@ -25,12 +27,17 @@ from app.core.storage import (
     public_url_for,
     upload_file_from_bytes,
 )
+from app.models.digital_asset import DigitalAsset
 from app.models.document import Document
 from app.models.enums import DocumentPurpose, DocumentStatus
 from app.models.merchant import Merchant
-from app.models.product import Product
+from app.models.order import Order, OrderStatus
+from app.models.order_item import OrderItem
+from app.models.payment_transaction import PaymentTransaction
+from app.models.product import Product, product_product_types
 from app.models.store import Store
 from app.models.user import User, UserRole, UserStatus, Gender
+from app.main import app
 from app.modules.documents.service import DocumentService, _check_magic
 from app.schemas.document import (
     DocumentCompleteRequest,
@@ -155,6 +162,21 @@ async def service(db) -> DocumentService:
 class TestCheckMagic:
     """Unit tests for the _check_magic helper."""
 
+    @pytest.mark.parametrize(
+        "content_type,signature",
+        [
+            ("application/pdf", b"%PDF-"),
+            ("application/epub+zip", b"PK\x03\x04"),
+            ("application/msword", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"),
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                b"PK\x03\x04",
+            ),
+        ],
+    )
+    def test_digital_document_signatures_match(self, content_type, signature):
+        assert _check_magic(content_type, signature)
+
     def test_png_signature_matches(self):
         png_header = b"\x89PNG\r\n\x1a\n"
         assert _check_magic("image/png", png_header) is True
@@ -169,6 +191,48 @@ class TestCheckMagic:
 
 class TestPresignedUpload:
     """Tests for DocumentService.create_presigned_upload."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content_type",
+        [
+            "application/pdf",
+            "application/epub+zip",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ],
+    )
+    async def test_digital_product_accepts_document_content_types(
+        self, service, test_merchant, content_type
+    ):
+        payload = DocumentUploadRequest(
+            purpose=DocumentPurpose.DIGITAL_PRODUCT.value,
+            filename="content",
+            content_type=content_type,
+            size_bytes=1024,
+        )
+        response = await service.create_presigned_upload(str(test_merchant.id), payload)
+        assert response.upload_url
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content_type",
+        ["image/png", "video/mp4", "application/octet-stream"],
+    )
+    async def test_digital_product_rejects_non_document_content_types(
+        self, service, test_merchant, content_type
+    ):
+        from fastapi import HTTPException
+
+        payload = DocumentUploadRequest(
+            purpose=DocumentPurpose.DIGITAL_PRODUCT.value,
+            filename="content.bin",
+            content_type=content_type,
+            size_bytes=1024,
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await service.create_presigned_upload(str(test_merchant.id), payload)
+        assert exc_info.value.status_code == 400
 
     @pytest.mark.asyncio
     async def test_presigned_upload_creates_pending_document(
@@ -242,6 +306,164 @@ class TestPresignedUpload:
         with pytest.raises(HTTPException) as exc_info:
             await service.create_presigned_upload(str(test_merchant.id), payload)
         assert exc_info.value.status_code == 413
+
+
+class TestDigitalProductUpload:
+    @pytest.mark.asyncio
+    async def test_upload_stores_private_asset_and_links_product(
+        self, service, test_product, db
+    ):
+        await db.execute(
+            product_product_types.insert().values(
+                product_id=test_product.id,
+                product_type="digital",
+            )
+        )
+        await db.commit()
+
+        result = await service.upload_digital_product_file(
+            product_id_str=str(test_product.id),
+            file_data=b"%PDF-1.7\nsample content",
+            original_filename="guide.pdf",
+        )
+
+        assert result["url"] == f"/api/v1/catalog/products/{test_product.id}/digital-file"
+        assert result["filename"] == "guide.pdf"
+        assert result["key"].startswith("digital_product/")
+        asset = await db.scalar(
+            select(DigitalAsset).where(DigitalAsset.product_id == test_product.id)
+        )
+        assert asset is not None
+        assert asset.storage_key == result["key"]
+        assert inspect_object(bucket=settings.S3_BUCKET, key=asset.storage_key) is not None
+        from app.modules.catalog.service.implementation import CatalogServiceImpl
+
+        product_response = await CatalogServiceImpl(db).get_product(str(test_product.id))
+        assert product_response.digital_file_url == result["url"]
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_non_digital_product(self, service, test_product):
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.upload_digital_product_file(
+                product_id_str=str(test_product.id),
+                file_data=b"%PDF-1.7\nsample content",
+                original_filename="guide.pdf",
+            )
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_invalid_document_signature(
+        self, service, test_product, db
+    ):
+        from fastapi import HTTPException
+
+        await db.execute(
+            product_product_types.insert().values(
+                product_id=test_product.id,
+                product_type="digital",
+            )
+        )
+        await db.commit()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.upload_digital_product_file(
+                product_id_str=str(test_product.id),
+                file_data=b"not a pdf",
+                original_filename="guide.pdf",
+            )
+        assert exc_info.value.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_multipart_upload_route_stores_file_on_backend(
+        self, client, test_user, test_product, db
+    ):
+        await db.execute(
+            product_product_types.insert().values(
+                product_id=test_product.id,
+                product_type="digital",
+            )
+        )
+        await db.commit()
+        app.dependency_overrides[get_current_active_user] = lambda: test_user
+
+        response = await client.post(
+            "/api/v1/catalog/product-file-upload",
+            data={"product_id": str(test_product.id), "fulfillment": "digital"},
+            files={"file": ("guide.pdf", b"%PDF-1.7\nsample content", "application/pdf")},
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["url"] == f"/api/v1/catalog/products/{test_product.id}/digital-file"
+        assert body["key"].startswith("digital_product/")
+        assert "upload_url" not in body
+
+    @pytest.mark.asyncio
+    async def test_buyer_must_have_paid_for_product_to_get_file_url(
+        self, client, test_user, test_merchant, test_product, db
+    ):
+        await db.execute(
+            product_product_types.insert().values(
+                product_id=test_product.id,
+                product_type="digital",
+            )
+        )
+        db.add(DigitalAsset(product_id=test_product.id, storage_key="digital_product/test.pdf"))
+        test_user.role = UserRole.BUYER
+        await db.commit()
+        app.dependency_overrides[get_current_active_user] = lambda: test_user
+
+        path = f"/api/v1/catalog/products/{test_product.id}/digital-file"
+        unauthorized = await client.get(path)
+        assert unauthorized.status_code == 404
+
+        accepted_order = Order(
+            buyer_id=test_user.id,
+            order_number=f"ORD-{uuid.uuid4().hex[:12]}",
+            status=OrderStatus.ACCEPTED.value,
+            currency="NGN",
+            total_amount=1000,
+        )
+        db.add(accepted_order)
+        await db.flush()
+        db.add(
+            OrderItem(
+                order_id=accepted_order.id,
+                merchant_id=test_merchant.id,
+                product_id=test_product.id,
+                quantity=1,
+                unit_price=1000,
+                currency="NGN",
+                line_total=1000,
+            )
+        )
+        await db.commit()
+
+        unpaid_accepted = await client.get(path)
+        assert unpaid_accepted.status_code == 404
+
+        db.add(
+            PaymentTransaction(
+                order_id=accepted_order.id,
+                provider="paystack",
+                provider_reference=f"ref-{uuid.uuid4().hex}",
+                status="success",
+                amount=1000,
+                currency="NGN",
+            )
+        )
+        await db.commit()
+
+        paid_accepted = await client.get(path)
+        assert paid_accepted.status_code == 200
+
+        accepted_order.status = OrderStatus.PAID.value
+        await db.commit()
+        authorized = await client.get(path)
+        assert authorized.status_code == 200
+        assert authorized.json()["download_url"]
 
 
 class TestCompleteUpload:
@@ -830,3 +1052,25 @@ class TestPublicUrlFor:
         )
         url = storage_mod.public_url_for("some/key.png")
         assert url == "https://cdn.example.com/some/key.png"
+
+
+class TestS3Client:
+    def test_strips_credentials_and_region_when_creating_client(self, monkeypatch):
+        import app.core.storage as storage_mod
+
+        captured = {}
+        monkeypatch.setattr(storage_mod.settings, "AWS_REGION", " us-east-1 ")
+        monkeypatch.setattr(storage_mod.settings, "AWS_ACCESS_KEY_ID", " test-access ")
+        monkeypatch.setattr(storage_mod.settings, "AWS_SECRET_ACCESS_KEY", " test-secret ")
+        monkeypatch.setattr(
+            storage_mod.boto3,
+            "client",
+            lambda service, **kwargs: captured.update(service=service, **kwargs),
+        )
+
+        storage_mod._s3_client()
+
+        assert captured["service"] == "s3"
+        assert captured["region_name"] == "us-east-1"
+        assert captured["aws_access_key_id"] == "test-access"
+        assert captured["aws_secret_access_key"] == "test-secret"

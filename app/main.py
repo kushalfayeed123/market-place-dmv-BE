@@ -6,9 +6,6 @@ Initializes the app, registers middleware, and includes routers.
 
 import logging
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.rate_limit import setup_rate_limiting
@@ -29,6 +26,8 @@ from app.modules.payments.router import router as payments_router
 from app.modules.product_attributes.router import router as product_attributes_router
 from app.modules.stores.router import router as stores_router
 from app.modules.support.router import router as support_router
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 # Setup logging
 setup_logging()
@@ -94,6 +93,7 @@ async def startup_event():
     # Validate S3 bucket is reachable (logs warning if not, but doesn't crash)
     try:
         import asyncio as _asyncio
+
         from app.core.storage import key_exists
 
         await _asyncio.to_thread(key_exists, bucket=settings.S3_BUCKET, key=".health-check")

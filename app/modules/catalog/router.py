@@ -5,10 +5,16 @@ Communicates with the service layer via the CatalogService abstraction.
 """
 
 
+from app.core.config import settings
 from app.core.idempotency import finalize_idempotency, get_idempotency_dependency
 from app.core.security import get_current_active_user, to_uuid
+from app.core.storage import presign_download
 from app.db.session import get_db
+from app.models.digital_asset import DigitalAsset
 from app.models.merchant import Merchant
+from app.models.order import Order, OrderStatus
+from app.models.order_item import OrderItem
+from app.models.payment_transaction import PaymentTransaction
 from app.models.product import Product
 from app.models.store import Store
 from app.models.user import UserRole
@@ -18,6 +24,8 @@ from app.modules.documents.service import DocumentService
 from app.schemas.catalog import (
     CategoryCreate,
     CategoryResponse,
+    DigitalProductFileDownloadResponse,
+    DigitalProductFileResponse,
     InventoryUpdate,
     ProductCreate,
     ProductResponse,
@@ -25,10 +33,21 @@ from app.schemas.catalog import (
     ProductVariantCreate,
     ProductVariantResponse,
 )
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse
-from sqlalchemy import select, func
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -186,6 +205,9 @@ async def list_products(
     merchant_id: str | None = None,
     category_id: str | None = None,
     status: str | None = Query(None, pattern="^(draft|active|suspended)$"),
+    product_type: str | None = Query(
+        None, description="Filter to products assigned to this type (e.g. 'digital')."
+    ),
     q: str | None = Query(None, description="Free-text search query (matches title, slug, description)"),
     price_min: int | None = Query(None, ge=0, description="Minimum price filter (inclusive, minor units)"),
     price_max: int | None = Query(None, ge=0, description="Maximum price filter (inclusive, minor units)"),
@@ -198,6 +220,7 @@ async def list_products(
         merchant_id=merchant_id,
         category_id=category_id,
         status=status,
+        product_type=product_type,
         search_query=q,
         price_min=price_min,
         price_max=price_max,
@@ -441,6 +464,165 @@ async def upload_product_image(
     return updated
 
 
+@router.post(
+    "/product-file-upload",
+    response_model=DigitalProductFileResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_product_file(
+    product_id: str = Form(...),
+    fulfillment: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: dict = get_current_active_user_depends,
+    db: AsyncSession = get_db_depends,
+):
+    """Receive digital content via multipart and store it privately on the backend."""
+    role = current_user.role.value
+    if role not in ["merchant_owner", "platform_admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the product's merchant owner can upload digital content.",
+        )
+    if fulfillment != "digital":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Digital content requires fulfillment='digital'.",
+        )
+
+    try:
+        product_uuid = to_uuid(product_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found.",
+        ) from exc
+
+    result = await db.execute(select(Product).where(Product.id == product_uuid))
+    product = result.scalar_one_or_none()
+    if product is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found.",
+        )
+
+    if role != "platform_admin":
+        ownership = await db.execute(
+            select(Merchant.id).where(
+                Merchant.id == product.merchant_id,
+                Merchant.owner_user_id == current_user.id,
+            )
+        )
+        if ownership.scalar_one_or_none() is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not authorized to update this product.",
+            )
+
+    max_bytes = settings.S3_MAX_UPLOAD_MB * 1024 * 1024
+    file_data = await file.read(max_bytes + 1)
+    if len(file_data) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds max upload size of {settings.S3_MAX_UPLOAD_MB}MB.",
+        )
+    return await DocumentService(db).upload_digital_product_file(
+        product_id_str=product_id,
+        file_data=file_data,
+        original_filename=file.filename or "",
+    )
+
+
+@router.get(
+    "/products/{product_id}/digital-file",
+    response_model=DigitalProductFileDownloadResponse,
+)
+async def get_purchased_product_file(
+    product_id: str,
+    current_user: dict = get_current_active_user_depends,
+    db: AsyncSession = get_db_depends,
+):
+    """Return a short-lived file URL only to a buyer who paid for the product."""
+    if current_user.role.value != "buyer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Digital product content is available to purchasing buyers only.",
+        )
+    try:
+        product_uuid = to_uuid(product_id)
+        buyer_uuid = to_uuid(str(current_user.id))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Digital product file not found.",
+        ) from exc
+
+    purchase = await db.execute(
+        select(OrderItem.id)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(
+            OrderItem.product_id == product_uuid,
+            Order.buyer_id == buyer_uuid,
+            or_(
+                Order.status.in_([
+                    OrderStatus.PAID.value,
+                    OrderStatus.PARTIALLY_FULFILLED.value,
+                    OrderStatus.SHIPPED.value,
+                    OrderStatus.FULFILLED.value,
+                ]),
+                and_(
+                    Order.status == OrderStatus.ACCEPTED.value,
+                    select(PaymentTransaction.id)
+                    .where(
+                        PaymentTransaction.order_id == Order.id,
+                        PaymentTransaction.status == "success",
+                    )
+                    .exists(),
+                ),
+            ),
+        )
+        .limit(1)
+    )
+    if purchase.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Digital product file not found.",
+        )
+
+    asset_result = await db.execute(
+        select(DigitalAsset).where(
+            DigitalAsset.product_id == product_uuid,
+            DigitalAsset.variant_id.is_(None),
+        )
+    )
+    asset = asset_result.scalar_one_or_none()
+    if asset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Digital product file not found.",
+        )
+
+    from pathlib import PurePosixPath
+    import mimetypes
+
+    filename = PurePosixPath(asset.storage_key).name
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    file_format = PurePosixPath(filename).suffix.lower().lstrip(".")
+    url = await run_in_threadpool(
+        presign_download,
+        bucket=settings.S3_BUCKET,
+        key=asset.storage_key,
+        ttl_seconds=settings.S3_DOWNLOAD_URL_TTL_SECONDS,
+        inline=True,
+    )
+    return {
+        "download_url": url,
+        "expires_in": settings.S3_DOWNLOAD_URL_TTL_SECONDS,
+        "filename": filename,
+        "content_type": content_type,
+        "format": file_format,
+    }
+
+
 # Inventory endpoints
 @router.put("/inventory/{variant_id}")
 async def update_inventory(
@@ -522,4 +704,3 @@ async def get_product_by_variant_sku(
 # Include the router in the main app
 def get_router():
     return router
-

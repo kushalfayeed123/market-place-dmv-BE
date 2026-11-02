@@ -7,14 +7,20 @@ Handles database operations for catalog using SQLAlchemy.
 
 import json
 
-from sqlalchemy import select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import to_uuid
 from app.models.category import Category
+from app.models.digital_asset import DigitalAsset
+from app.models.product import (
+    ALLOWED_PRODUCT_TYPES,
+    Product,
+    ProductStatus,
+    product_product_types,
+)
 from app.models.store import Store
 from app.models.inventory import Inventory
-from app.models.product import Product, ProductStatus
 from app.models.product_attribute_schema import ProductAttributeSchema
 from app.models.product_like import ProductLike
 from app.models.product_variant import ProductVariant
@@ -182,7 +188,7 @@ class CatalogServiceImpl(CatalogService):
             title=product_data.title,
             slug=product_data.slug,
             description=product_data.description,
-            fulfillment_type=product_data.fulfillment_type,
+            fulfillment_type=product_data.product_types[0],
             status=product_data.status or ProductStatus.DRAFT,
             base_price_amount=product_data.base_price_amount,
             base_price_currency=product_data.base_price_currency,
@@ -194,7 +200,17 @@ class CatalogServiceImpl(CatalogService):
         await self._db.commit()
         await self._db.refresh(new_product)
 
-        return self._product_to_response(new_product)
+        # Record the product's multiple types in the association table.
+        await self._db.execute(
+            insert(product_product_types),
+            [
+                {"product_id": new_product.id, "product_type": pt}
+                for pt in product_data.product_types
+            ],
+        )
+        await self._db.commit()
+
+        return self._product_to_response(new_product, product_types=product_data.product_types)
 
     async def add_product_image(self, product_id: str, image_url: str) -> ProductResponse:
         """Append an image URL to a product's ``urls`` JSON list (stored on a Text column)."""
@@ -221,7 +237,8 @@ class CatalogServiceImpl(CatalogService):
 
         await self._db.commit()
         await self._db.refresh(product)
-        return self._product_to_response(product)
+        product_types = await self._fetch_product_types(product.id)
+        return self._product_to_response(product, product_types=product_types)
 
     @staticmethod
     def _validate_attributes(attributes: dict, schema: dict) -> None:
@@ -301,7 +318,15 @@ class CatalogServiceImpl(CatalogService):
         # Fetch inventory quantities for these variants
         inventory_quantities = await self._inventory_quantities_map(variants)
 
-        return self._product_to_response(product, variants, inventory_quantities)
+        product_types = await self._fetch_product_types(product.id)
+        digital_file_url = await self._digital_file_url(product.id)
+        return self._product_to_response(
+            product,
+            variants,
+            inventory_quantities,
+            product_types=product_types,
+            digital_file_url=digital_file_url,
+        )
 
     async def list_products(
         self,
@@ -310,6 +335,7 @@ class CatalogServiceImpl(CatalogService):
         merchant_id: str | None = None,
         category_id: str | None = None,
         status: str | None = None,
+        product_type: str | None = None,
         search_query: str | None = None,
         price_min: int | None = None,
         price_max: int | None = None,
@@ -324,6 +350,9 @@ class CatalogServiceImpl(CatalogService):
             merchant_id: Filter by merchant ID.
             category_id: Filter by category ID.
             status: Filter by product status.
+            product_type: Filter to products assigned to this type
+                (e.g. "digital"). Multi-type products appear in every matching
+                section.
             
         Returns:
             List of product responses.
@@ -369,7 +398,17 @@ class CatalogServiceImpl(CatalogService):
         if currency:
             query = query.where(Product.base_price_currency == currency.upper())
 
-        query = query.offset(skip).limit(limit)
+        # Product type filter: products assigned to this type appear in this
+        # section; multi-type products match every section they belong to.
+        if product_type:
+            if product_type not in ALLOWED_PRODUCT_TYPES:
+                return []
+            type_subq = select(product_product_types.c.product_id).where(
+                product_product_types.c.product_type == product_type
+            )
+            query = query.where(Product.id.in_(type_subq))
+
+        query = query.order_by(Product.created_at.desc()).offset(skip).limit(limit)
         result = await self._db.execute(query)
         products = result.scalars().all()
         
@@ -390,8 +429,18 @@ class CatalogServiceImpl(CatalogService):
         # Fetch inventory quantities for all variants
         inventory_quantities = await self._inventory_quantities_map(all_variants)
 
+        # Batch-fetch product types for all listed products.
+        product_types_map = await self._fetch_product_types_map(product_uuids)
+        digital_file_urls = await self._digital_file_urls_map(product_uuids)
+
         return [
-            self._product_to_response(product, variants_by_product.get(product.id, []), inventory_quantities)
+            self._product_to_response(
+                product,
+                variants_by_product.get(product.id, []),
+                inventory_quantities,
+                product_types=product_types_map.get(product.id, []),
+                digital_file_url=digital_file_urls.get(product.id),
+            )
             for product in products
         ]
 
@@ -553,12 +602,38 @@ class CatalogServiceImpl(CatalogService):
         if "urls" in update_data:
             update_data["urls"] = _json.dumps(update_data["urls"] or [])
 
+        # product_types lives in the association table, not a column, so pop it
+        # out before applying column-level updates.
+        new_product_types = update_data.pop("product_types", None)
+
         # Apply the update
         for key, value in update_data.items():
             setattr(product, key, value)
 
+        # Replace the product's types and sync fulfillment_type to the primary.
+        if new_product_types is not None:
+            await self._db.execute(
+                delete(product_product_types).where(
+                    product_product_types.c.product_id == product.id
+                )
+            )
+            await self._db.execute(
+                insert(product_product_types),
+                [
+                    {"product_id": product.id, "product_type": pt}
+                    for pt in new_product_types
+                ],
+            )
+            product.fulfillment_type = new_product_types[0]
+
         await self._db.commit()
         await self._db.refresh(product)
+
+        # Determine the product types for the response.
+        if new_product_types is not None:
+            response_product_types = list(new_product_types)
+        else:
+            response_product_types = await self._fetch_product_types(product.id)
 
         # Return the full response (re-fetch variants + inventory)
         variants_result = await self._db.execute(
@@ -566,7 +641,13 @@ class CatalogServiceImpl(CatalogService):
         )
         variants = variants_result.scalars().all()
         inventory_quantities = await self._inventory_quantities_map(variants)
-        return self._product_to_response(product, variants, inventory_quantities)
+        return self._product_to_response(
+            product,
+            variants,
+            inventory_quantities,
+            product_types=response_product_types,
+            digital_file_url=await self._digital_file_url(product.id),
+        )
 
     async def like_product(self, user_id: str, product_id: str) -> bool:
         """
@@ -744,7 +825,13 @@ class CatalogServiceImpl(CatalogService):
         )
         variants = variants_result.scalars().all()
 
-        return self._product_to_response(product, variants)
+        product_types = await self._fetch_product_types(product.id)
+        return self._product_to_response(
+            product,
+            variants,
+            product_types=product_types,
+            digital_file_url=await self._digital_file_url(product.id),
+        )
 
     @staticmethod
     def _category_to_response(category: Category) -> CategoryResponse:
@@ -763,6 +850,8 @@ class CatalogServiceImpl(CatalogService):
         variants: list | None = None,
         inventory_quantities: dict | None = None,
         store_name: str | None = None,
+        product_types: list[str] | None = None,
+        digital_file_url: str | None = None,
     ) -> ProductResponse:
         """Convert a Product model to ProductResponse schema.
 
@@ -774,6 +863,9 @@ class CatalogServiceImpl(CatalogService):
                 quantity_available (int). When provided, each variant's
                 quantity_available is populated from this dict. When absent,
                 variant quantity_available defaults to None.
+            product_types: The product's assigned types. When None, defaults
+                to an empty list (callers should pre-fetch where available).
+            digital_file_url: Stable, purchase-gated URL for digital product content.
         """
         import json
 
@@ -821,6 +913,8 @@ class CatalogServiceImpl(CatalogService):
             slug=product.slug,
             description=product.description,
             fulfillment_type=product.fulfillment_type,
+            product_types=product_types or [],
+            digital_file_url=digital_file_url,
             status=product.status,
             base_price_amount=product.base_price_amount,
             base_price_currency=product.base_price_currency,
@@ -830,6 +924,57 @@ class CatalogServiceImpl(CatalogService):
             updated_at=product.updated_at,
             variants=variant_responses,
         )
+
+    async def _fetch_product_types(self, product_id) -> list[str]:
+        """Fetch the product types assigned to a single product."""
+        result = await self._db.execute(
+            select(product_product_types.c.product_type).where(
+                product_product_types.c.product_id == product_id
+            )
+        )
+        return [row[0] for row in result.fetchall()]
+
+    async def _fetch_product_types_map(self, product_ids: list) -> dict:
+        """Fetch product types for multiple products, grouped by product id."""
+        if not product_ids:
+            return {}
+        result = await self._db.execute(
+            select(
+                product_product_types.c.product_id,
+                product_product_types.c.product_type,
+            ).where(product_product_types.c.product_id.in_(product_ids))
+        )
+        mapping: dict = {}
+        for pid, ptype in result.fetchall():
+            mapping.setdefault(pid, []).append(ptype)
+        return mapping
+
+    async def _digital_file_url(self, product_id) -> str | None:
+        """Return the stable purchase-gated URL when a product has an asset."""
+        result = await self._db.execute(
+            select(DigitalAsset.id).where(
+                DigitalAsset.product_id == product_id,
+                DigitalAsset.variant_id.is_(None),
+            )
+        )
+        if result.scalar_one_or_none() is None:
+            return None
+        return f"/api/v1/catalog/products/{product_id}/digital-file"
+
+    async def _digital_file_urls_map(self, product_ids: list) -> dict:
+        """Fetch stable digital-file URLs for product listings in one query."""
+        if not product_ids:
+            return {}
+        result = await self._db.execute(
+            select(DigitalAsset.product_id).where(
+                DigitalAsset.product_id.in_(product_ids),
+                DigitalAsset.variant_id.is_(None),
+            )
+        )
+        return {
+            product_id: f"/api/v1/catalog/products/{product_id}/digital-file"
+            for product_id in result.scalars().all()
+        }
 
     async def _inventory_quantities_map(self, variants: list) -> dict:
         """Build a {variant_id: quantity_available} map for a list of variants.

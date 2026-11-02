@@ -93,12 +93,13 @@ class Settings(BaseSettings):
     # images, KYC documents, store logos/banners, avatars).  Local dev and
     # testing use moto (mock_aws) at the transport layer so no real credentials
     # are required during tests.  In production set real AWS credentials.
-    AWS_REGION: str = Field("us-east-1", env="AWS_REGION")
-    AWS_ACCESS_KEY_ID: str = Field(..., env="AWS_ACCESS_KEY_ID")
-    AWS_SECRET_ACCESS_KEY: str = Field(..., env="AWS_SECRET_ACCESS_KEY")
+    AWS_REGION: str = Field("eu-north-1", env="AWS_REGION")
+    AWS_ACCESS_KEY_ID: str = Field("", env="AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY: str = Field("", env="AWS_SECRET_ACCESS_KEY")
+    AWS_SESSION_TOKEN: str = Field("", env="AWS_SESSION_TOKEN")
     S3_BUCKET: str = Field(..., env="S3_BUCKET")
     S3_UPLOAD_URL_TTL_SECONDS: int = Field(3600, env="S3_UPLOAD_URL_TTL_SECONDS")
-    S3_DOWNLOAD_URL_TTL_SECONDS: int = Field(300, env="S3_DOWNLOAD_URL_TTL_SECONDS")
+    S3_DOWNLOAD_URL_TTL_SECONDS: int = Field(43200, env="S3_DOWNLOAD_URL_TTL_SECONDS")
     S3_MAX_UPLOAD_MB: int = Field(10, env="S3_MAX_UPLOAD_MB")
     # Base URL used to serve public documents (e.g. CloudFront distribution).
     # When empty, presigned download URLs are returned instead.
@@ -116,6 +117,14 @@ class Settings(BaseSettings):
     SUPPORT_SMTP_PASSWORD: str = Field("", env="SUPPORT_SMTP_PASSWORD")
     SUPPORT_EMAIL_FROM: str = Field("", env="SUPPORT_EMAIL_FROM")
     SUPPORT_EMAIL_TO: str = Field("", env="SUPPORT_EMAIL_TO")             # comma-separated pickup mailbox(es)
+
+    # Email notifications are delivered through Resend.
+    RESEND_API_KEY: str = Field("", env="RESEND_API_KEY")
+    RESEND_FROM_EMAIL: str = Field("", env="RESEND_FROM_EMAIL")
+
+    NOTIFICATION_TWILIO_ACCOUNT_SID: str = Field("", env="NOTIFICATION_TWILIO_ACCOUNT_SID")
+    NOTIFICATION_TWILIO_AUTH_TOKEN: str = Field("", env="NOTIFICATION_TWILIO_AUTH_TOKEN")
+    NOTIFICATION_TWILIO_FROM: str = Field("", env="NOTIFICATION_TWILIO_FROM")
 
     # Frontend URL — used by the stub Paystack redirect to return buyers to the store
     FRONTEND_URL: str = Field("http://localhost:3000", env="FRONTEND_URL")

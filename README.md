@@ -14,6 +14,7 @@ This is the backend service for the Marketplace Platform, built with FastAPI and
 - **Storage**: AWS S3 for digital assets
 - **Payments**: Paystack integration with webhook handling
 - **Background Workers**: Payout auto-release, webhook processing
+- **Notifications**: Email delivery through Resend; SMS through Twilio; in-app notifications stored in the database
 
 ## Technology Stack
 
@@ -61,6 +62,13 @@ backend/
 ```
 
 ## Getting Started
+
+### Notification Email Delivery
+
+The notification worker sends email through the [Resend API](https://resend.com/docs/api-reference/emails/send-email).
+Set `RESEND_API_KEY` and `RESEND_FROM_EMAIL` in the backend environment. The
+sender address must use a domain verified in your Resend account. Start the
+worker separately from the API with `python -m app.workers.notification_worker`.
 
 ### Prerequisites
 

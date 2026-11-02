@@ -17,7 +17,7 @@ from app.models.notification import NotificationChannel, NotificationType
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
-from app.models.product import Product
+from app.models.product import Product, product_product_types
 from app.models.product_variant import ProductVariant
 from app.modules.notifications.service.base import NotificationService
 from app.modules.orders.service.base import OrderService
@@ -84,6 +84,8 @@ class OrderServiceImpl(OrderService):
         # Calculate order total and validate items
         order_total = 0
         order_items_data = []
+        requires_delivery = False
+        cart_types: set[str] = set()
 
         for cart_item in checkout_data.items:
             # Get product variant
@@ -105,6 +107,17 @@ class OrderServiceImpl(OrderService):
 
             if not product:
                 raise ValueError(f"Product for variant {cart_item.variant_id} not found")
+
+            cart_types.add(product.fulfillment_type)
+            product_types_result = await self._db.execute(
+                select(product_product_types.c.product_type).where(
+                    product_product_types.c.product_id == product.id
+                )
+            )
+            product_types = set(product_types_result.scalars().all())
+            cart_types.update(product_types)
+            if product.fulfillment_type == "physical" or "physical" in product_types:
+                requires_delivery = True
 
             # Check inventory if tracked
             if variant.inventory_policy == "tracked":
@@ -138,14 +151,18 @@ class OrderServiceImpl(OrderService):
                 "line_total": line_total,
             })
 
-        # Ensure delivery address is present for delivery orders.
-        # If fulfillment_option is "delivery" or unspecified (delivery is the
-        # default for physical products), the buyer must supply a delivery
-        # address so the merchant can complete the delivery.
         fulfillment_option = checkout_data.fulfillment_option
-        if fulfillment_option != "pickup" and not checkout_data.delivery_address:
+        if fulfillment_option is None:
+            fulfillment_option = (
+                "delivery" if requires_delivery
+                else "digital" if "digital" in cart_types
+                else "service"
+            )
+        if fulfillment_option == "delivery" and not checkout_data.delivery_address:
+            raise ValueError("delivery_address is required for delivery orders")
+        if requires_delivery and fulfillment_option != "pickup" and not checkout_data.delivery_address:
             raise ValueError(
-                "delivery_address is required when fulfillment_option is 'delivery'"
+                "delivery_address is required for carts containing physical products"
             )
 
         # Create order
@@ -234,7 +251,7 @@ class OrderServiceImpl(OrderService):
             item_count=sum(item_data["quantity"] for item_data in order_items_data),
             created_at=new_order.created_at,
             delivery_address=checkout_data.delivery_address,
-            fulfillment_option=checkout_data.fulfillment_option,
+            fulfillment_option=fulfillment_option,
             items=[
                 {
                     "id": str(item_data.get("variant_id", "")),

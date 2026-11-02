@@ -149,6 +149,44 @@ async def get_payment_by_order(
     return payment
 
 
+@router.post("/order/{order_id}/verify", response_model=PaymentResponse)
+async def verify_payment_by_order(
+    order_id: str,
+    current_user: dict = get_current_active_user_depends,
+    service: PaymentService = get_payment_service_depends,
+):
+    """Reconcile a pending payment with its provider for the authenticated buyer."""
+    try:
+        payment = await service.verify_payment_by_order(
+            order_id, str(current_user.id)
+        )
+    except ValueError as exc:
+        error_msg = str(exc)
+        if "not found" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=error_msg
+            ) from exc
+        if "not authorized" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=error_msg
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    if payment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No payment found for this order",
+        )
+    return payment
+
+
 @router.get("/methods", response_model=list[PaymentProviderInfo])
 async def list_payment_methods(
     current_user: dict = get_current_active_user_depends,

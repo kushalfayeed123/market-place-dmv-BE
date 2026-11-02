@@ -49,3 +49,5 @@ class DocumentPurpose(str, PyEnum):
     STORE_LOGO = "store_logo"         # store front/logo (public via CDN)
     STORE_BANNER = "store_banner"     # store banner (public via CDN)
     USER_AVATAR = "user_avatar"       # user profile avatar (public via CDN)
+    # Private digital product asset (served only through the gated viewer)
+    DIGITAL_PRODUCT = "digital_product"

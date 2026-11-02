@@ -54,12 +54,26 @@ def _s3_client():
     reused internally.  In tests, moto's ``mock_aws`` intercepts at the
     transport layer, so no real network call is ever made.
     """
+    credentials = {}
+    access_key = settings.AWS_ACCESS_KEY_ID.strip()
+    secret_key = settings.AWS_SECRET_ACCESS_KEY.strip()
+    session_token = settings.AWS_SESSION_TOKEN.strip()
+    if access_key or secret_key or session_token:
+        if not access_key or not secret_key:
+            raise ValueError(
+                "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be configured together."
+            )
+        credentials = {
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
+        }
+        if session_token:
+            credentials["aws_session_token"] = session_token
     return boto3.client(
         "s3",
-        region_name=settings.AWS_REGION,
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION.strip(),
         config=Config(signature_version="s3v4"),
+        **credentials,
     )
 
 
@@ -121,6 +135,7 @@ def presign_download(
     bucket: str,
     key: str,
     ttl_seconds: int | None = None,
+    inline: bool = False,
 ) -> str:
     """
     Generate a short-lived presigned URL to download an object.
@@ -132,10 +147,11 @@ def presign_download(
     if ttl_seconds is None:
         ttl_seconds = settings.S3_DOWNLOAD_URL_TTL_SECONDS
 
+    params: dict[str, str] = {"Bucket": bucket, "Key": key}
+    if inline:
+        params["ResponseContentDisposition"] = "inline"
     url = client.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": bucket, "Key": key},
-        ExpiresIn=ttl_seconds,
+        "get_object", Params=params, ExpiresIn=ttl_seconds
     )
     return url
 
@@ -258,4 +274,3 @@ def read_object_head(*, bucket: str, key: str, length: int = 512) -> bytes | Non
             return None
         logger.warning("S3 get_object failed for %s/%s: %s", bucket, key, exc)
         return None
-

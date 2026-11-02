@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
+    Table,
     Text,
     UniqueConstraint,
     text,
@@ -30,6 +31,31 @@ class ProductStatus(str, PyEnum):
     DRAFT = "draft"
     ACTIVE = "active"
     SUSPENDED = "suspended"
+
+
+# Allowed product type values. A product can belong to multiple types (e.g. a
+# book can be both "physical" and "digital"), so these are stored in the
+# ``product_product_types`` association table rather than a single column.
+ALLOWED_PRODUCT_TYPES: tuple[str, ...] = ("physical", "digital", "service")
+
+# Association table: many-to-many link between products and their types.
+product_product_types = Table(
+    "product_product_types",
+    BaseModel.metadata,
+    Column(
+        "product_id",
+        UUID(as_uuid=True),
+        ForeignKey("products.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "product_type",
+        String(50),
+        primary_key=True,
+    ),
+    Index("idx_product_product_types_product", "product_id"),
+    Index("idx_product_product_types_type", "product_type"),
+)
 
 
 class Product(BaseModel):

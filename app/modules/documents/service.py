@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
+import zipfile
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -36,6 +39,8 @@ from app.core.storage import (
 )
 from app.models.document import Document
 from app.models.enums import DocumentPurpose, DocumentStatus
+from app.models.digital_asset import DigitalAsset
+from app.models.product import Product, product_product_types
 from app.schemas.document import (
     DocumentCompleteRequest,
     DocumentListResponse,
@@ -61,15 +66,33 @@ ALLOWED_CONTENT_TYPES: dict[str, set[str]] = {
     DocumentPurpose.STORE_LOGO.value: {"image/jpeg", "image/png", "image/webp", "image/svg+xml"},
     DocumentPurpose.STORE_BANNER.value: {"image/jpeg", "image/png", "image/webp", "image/gif"},
     DocumentPurpose.USER_AVATAR.value: {"image/jpeg", "image/png", "image/webp", "image/gif"},
+    # Digital product content is served privately through the gated viewer.
+    DocumentPurpose.DIGITAL_PRODUCT.value: {
+        "application/pdf",
+        "application/epub+zip",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
 }
 
 MAGIC_SIGNATURES: dict[str, bytes] = {
     "application/pdf": b"%PDF-",
+    "application/epub+zip": b"PK\x03\x04",
+    "application/msword": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": b"PK\x03\x04",
     "image/png": b"\x89PNG\r\n\x1a\n",
     "image/jpeg": b"\xff\xd8\xff",
     "image/gif": b"GIF87a",
     "image/webp": b"RIFF",
     "image/svg+xml": b"<?xml",
+    "video/webm": b"\x1a\x45\xdf\xa3",  # EBML header
+}
+
+DIGITAL_PRODUCT_TYPES_BY_EXTENSION: dict[str, str] = {
+    ".pdf": "application/pdf",
+    ".epub": "application/epub+zip",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
 PURPOSE_TARGETS: dict[str, tuple[str, str]] = {
@@ -700,12 +723,130 @@ class DocumentService:
             related_id=product.id,
         )
         self._db.add(doc)
-
-        # Link to domain model (appends the public URL to product.urls)
         await self._link_to_domain(doc)
-
         await self._db.commit()
         await self._db.refresh(doc)
         return _to_response(doc)
 
+    async def upload_digital_product_file(
+        self,
+        product_id_str: str,
+        file_data: bytes,
+        original_filename: str,
+    ) -> dict[str, str]:
+        """Store private digital product content and link its key to the product."""
+        product = await self._get_product(product_id_str)
+        product_types = await self._db.execute(
+            select(product_product_types.c.product_type).where(
+                product_product_types.c.product_id == product.id
+            )
+        )
+        if "digital" not in product_types.scalars().all():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Digital content can only be uploaded to a digital product.",
+            )
 
+        filename = original_filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        content_type = DIGITAL_PRODUCT_TYPES_BY_EXTENSION.get(extension)
+        if content_type is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File must be a PDF, EPUB, or Word document (.doc or .docx).",
+            )
+
+        max_bytes = settings.S3_MAX_UPLOAD_MB * 1024 * 1024
+        if not file_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File size must be greater than zero.",
+            )
+        if len(file_data) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File exceeds max upload size of {settings.S3_MAX_UPLOAD_MB}MB.",
+            )
+        if not _check_magic(content_type, file_data):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="File content does not match its extension.",
+            )
+        if content_type in {
+            "application/epub+zip",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }:
+            try:
+                with zipfile.ZipFile(BytesIO(file_data)) as archive:
+                    names = set(archive.namelist())
+                    if content_type == "application/epub+zip":
+                        valid_archive = (
+                            archive.namelist()
+                            and archive.namelist()[0] == "mimetype"
+                            and archive.read("mimetype") == b"application/epub+zip"
+                        )
+                    else:
+                        valid_archive = {
+                            "[Content_Types].xml",
+                            "word/document.xml",
+                        }.issubset(names)
+            except (OSError, zipfile.BadZipFile, KeyError):
+                valid_archive = False
+            if not valid_archive:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="File is not a valid EPUB or Word document.",
+                )
+
+        key = build_key(
+            merchant_id=str(product.merchant_id),
+            purpose=DocumentPurpose.DIGITAL_PRODUCT.value,
+            original_filename=f"content{extension}",
+        )
+        try:
+            await run_in_threadpool(
+                upload_file_from_bytes,
+                bucket=settings.S3_BUCKET,
+                key=key,
+                data=file_data,
+                content_type=content_type,
+            )
+        except S3UploadError as exc:
+            logger.error("Digital product upload failed for product %s: %s", product.id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to store digital product content. Please try again.",
+            ) from exc
+
+        result = await self._db.execute(
+            select(DigitalAsset).where(
+                DigitalAsset.product_id == product.id,
+                DigitalAsset.variant_id.is_(None),
+            )
+        )
+        asset = result.scalar_one_or_none()
+        previous_key = asset.storage_key if asset else None
+        if asset is None:
+            asset = DigitalAsset(product_id=product.id, storage_key=key)
+            self._db.add(asset)
+        else:
+            asset.storage_key = key
+
+        try:
+            await self._db.commit()
+        except SQLAlchemyError:
+            await self._db.rollback()
+            await run_in_threadpool(delete_object, bucket=settings.S3_BUCKET, key=key)
+            raise
+
+        if previous_key:
+            await run_in_threadpool(
+                delete_object,
+                bucket=settings.S3_BUCKET,
+                key=previous_key,
+            )
+        return {
+            "url": f"/api/v1/catalog/products/{product.id}/digital-file",
+            "key": key,
+            "filename": filename,
+        }

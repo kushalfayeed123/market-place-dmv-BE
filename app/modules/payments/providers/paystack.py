@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.modules.payments.providers.base import (
     PaymentInitResult,
     PaymentProvider,
+    PaymentVerificationResult,
 )
 
 # Paystack API base URL — production uses api.paystack.co, but test keys
@@ -108,7 +109,7 @@ class PaystackProvider(PaymentProvider):
     async def verify_transaction(self, provider_reference: str) -> bool:
         """Verify a Paystack transaction by reference."""
         if not self._configured:
-            return True  # stub — assume success for local testing
+            return False
 
         url = f"{PAYSTACK_API_BASE}/transaction/verify/{provider_reference}"
         headers = {"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"}
@@ -124,6 +125,39 @@ class PaystackProvider(PaymentProvider):
             return data.get("data", {}).get("status") == "success"
         except Exception:
             return False
+
+    async def verify_transaction_details(
+        self, provider_reference: str
+    ) -> PaymentVerificationResult | None:
+        """Fetch Paystack's verified status, amount, and currency."""
+        if not self._configured:
+            return None
+
+        url = f"{PAYSTACK_API_BASE}/transaction/verify/{provider_reference}"
+        headers = {
+            "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(url, headers=headers)
+                response_data = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError("Could not verify the payment with Paystack.") from exc
+
+        if response.status_code != 200 or not response_data.get("status", True):
+            return None
+
+        transaction = response_data.get("data", {})
+        amount = transaction.get("amount")
+        currency = transaction.get("currency")
+        if not isinstance(amount, int) or not isinstance(currency, str):
+            return None
+        return PaymentVerificationResult(
+            status=str(transaction.get("status", "unknown")),
+            amount=amount,
+            currency=currency,
+        )
 
     # ── Stub fallback ─────────────────────────────────────────────────
 

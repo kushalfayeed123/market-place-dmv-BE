@@ -73,6 +73,13 @@ class PaymentService(ABC):
         ...
 
     @abstractmethod
+    async def verify_payment_by_order(
+        self, order_id: str, user_id: str
+    ) -> PaymentResponse | None:
+        """Reconcile a pending payment with its provider for the order buyer."""
+        ...
+
+    @abstractmethod
     async def list_payments(
         self,
         skip: int = 0,

@@ -42,3 +42,15 @@ class NotificationService(ABC):
     ) -> list[NotificationResponse]:
         """Claim pending notifications suitable for dispatch by the worker."""
         ...
+
+    @abstractmethod
+    async def get_recipient_address(
+        self, notification: NotificationResponse
+    ) -> Optional[str]:
+        """Resolve the recipient's email address or phone number for delivery."""
+        ...
+
+    @abstractmethod
+    async def mark_failed(self, notification_id: str) -> bool:
+        """Mark a claimed notification as failed."""
+        ...

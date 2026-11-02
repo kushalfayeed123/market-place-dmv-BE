@@ -8,7 +8,9 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import to_uuid
-from app.models.notification import Notification, NotificationStatus
+from app.models.merchant import Merchant
+from app.models.notification import Notification, NotificationChannel, NotificationStatus
+from app.models.user import User
 from app.modules.notifications.service.base import NotificationService
 from app.schemas.notification import NotificationCreate, NotificationResponse
 
@@ -129,21 +131,67 @@ class NotificationServiceImpl(NotificationService):
         if not pending_ids:
             return []
 
-        # 2. Atomically flip PENDING -> SENDING for those IDs
-        await self._db.execute(
-            update(Notification)
-            .where(Notification.id.in_(pending_ids))
-            .where(Notification.status == NotificationStatus.PENDING.value)
-            .values(status=NotificationStatus.SENDING.value)
-        )
+        # Claim each row conditionally; only this worker's successful claims
+        # may be dispatched when multiple worker instances are running.
+        claimed_ids = []
+        for notification_id in pending_ids:
+            claim = await self._db.execute(
+                update(Notification)
+                .where(Notification.id == notification_id)
+                .where(Notification.status == NotificationStatus.PENDING.value)
+                .values(status=NotificationStatus.SENDING.value)
+            )
+            if claim.rowcount == 1:
+                claimed_ids.append(notification_id)
         await self._db.commit()
 
-        # 3. Read the SENDING rows for this worker run
+        # 3. Read only rows successfully claimed by this worker
+        if not claimed_ids:
+            return []
         result = await self._db.execute(
             select(Notification)
-            .where(Notification.id.in_(pending_ids))
+            .where(Notification.id.in_(claimed_ids))
             .order_by(Notification.created_at.asc())
         )
         rows = result.scalars().all()
         return [await self._to_response(n) for n in rows]
 
+    async def get_recipient_address(
+        self, notification: NotificationResponse
+    ) -> str | None:
+        """Resolve the address from the user or merchant who owns the notification."""
+        if notification.user_id:
+            user_id = to_uuid(notification.user_id)
+        elif notification.merchant_id:
+            merchant_result = await self._db.execute(
+                select(Merchant.owner_user_id).where(
+                    Merchant.id == to_uuid(notification.merchant_id)
+                )
+            )
+            user_id = merchant_result.scalar_one_or_none()
+        else:
+            return None
+
+        if user_id is None:
+            return None
+
+        address_column = (
+            User.email
+            if notification.channel == NotificationChannel.EMAIL.value
+            else User.phone
+        )
+        result = await self._db.execute(
+            select(address_column).where(User.id == user_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def mark_failed(self, notification_id: str) -> bool:
+        """Mark a notification failed only if it is still claimed for delivery."""
+        result = await self._db.execute(
+            update(Notification)
+            .where(Notification.id == to_uuid(notification_id))
+            .where(Notification.status == NotificationStatus.SENDING.value)
+            .values(status=NotificationStatus.FAILED.value)
+        )
+        await self._db.commit()
+        return result.rowcount == 1
