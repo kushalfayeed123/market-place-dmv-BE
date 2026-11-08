@@ -24,6 +24,7 @@ from app.models.inventory import Inventory
 from app.models.product_attribute_schema import ProductAttributeSchema
 from app.models.product_like import ProductLike
 from app.models.product_variant import ProductVariant
+from app.models.enums import InventoryPolicy
 from app.modules.catalog.service.base import CatalogService
 from app.schemas.catalog import (
     CategoryCreate,
@@ -34,6 +35,7 @@ from app.schemas.catalog import (
     ProductUpdate,
     ProductVariantCreate,
     ProductVariantResponse,
+    ProductVariantUpdate,
 )
 
 
@@ -210,7 +212,55 @@ class CatalogServiceImpl(CatalogService):
         )
         await self._db.commit()
 
-        return self._product_to_response(new_product, product_types=product_data.product_types)
+        # Every product gets a default variant so it is always purchasable.
+        variant = await self._ensure_default_variant(new_product, product_data.product_types)
+        inventory_quantities = await self._inventory_quantities_map([variant])
+        return self._product_to_response(
+            new_product,
+            [variant],
+            inventory_quantities,
+            product_types=product_data.product_types,
+        )
+
+    async def _ensure_default_variant(
+        self, product: Product, product_types: list[str]
+    ) -> ProductVariant:
+        """Return the product's first variant, creating a default one if none exists.
+
+        Digital and service products default to the ``unlimited`` inventory
+        policy (no stock count is needed); physical products default to
+        ``tracked``.
+        """
+        result = await self._db.execute(
+            select(ProductVariant)
+            .where(ProductVariant.product_id == product.id)
+            .order_by(ProductVariant.created_at)
+        )
+        existing = result.scalars().first()
+        if existing is not None:
+            return existing
+
+        policy = (
+            InventoryPolicy.TRACKED.value
+            if "physical" in product_types
+            else InventoryPolicy.UNLIMITED.value
+        )
+        sku = f"{product.slug}-{str(product.id).replace('-', '')[:8]}".upper()[:255]
+        variant = ProductVariant(
+            product_id=product.id,
+            sku=sku,
+            attributes="{}",
+            inventory_policy=policy,
+        )
+        self._db.add(variant)
+        await self._db.flush()
+        if policy == InventoryPolicy.TRACKED.value:
+            self._db.add(
+                Inventory(variant_id=variant.id, quantity_available=0, quantity_reserved=0)
+            )
+        await self._db.commit()
+        await self._db.refresh(variant)
+        return variant
 
     async def add_product_image(self, product_id: str, image_url: str) -> ProductResponse:
         """Append an image URL to a product's ``urls`` JSON list (stored on a Text column)."""
@@ -640,6 +690,10 @@ class CatalogServiceImpl(CatalogService):
             select(ProductVariant).where(ProductVariant.product_id == product_uuid)
         )
         variants = variants_result.scalars().all()
+        if not variants:
+            # Products created before variants existed (or via paths that skip
+            # them) get a default variant on update so they stay purchasable.
+            variants = [await self._ensure_default_variant(product, response_product_types)]
         inventory_quantities = await self._inventory_quantities_map(variants)
         return self._product_to_response(
             product,
@@ -744,6 +798,81 @@ class CatalogServiceImpl(CatalogService):
                 liked = False
 
         return {"count": count, "liked": liked}
+
+    async def get_product_variant(
+        self, product_id: str, variant_id: str
+    ) -> ProductVariantResponse | None:
+        """
+        Get a single variant of a product.
+
+        Args:
+            product_id: The parent product ID.
+            variant_id: The variant ID.
+
+        Returns:
+            The variant response if found, None otherwise.
+        """
+        try:
+            product_uuid = to_uuid(product_id)
+            variant_uuid = to_uuid(variant_id)
+        except ValueError:
+            return None
+
+        result = await self._db.execute(
+            select(ProductVariant).where(
+                ProductVariant.id == variant_uuid,
+                ProductVariant.product_id == product_uuid,
+            )
+        )
+        variant = result.scalar_one_or_none()
+        if variant is None:
+            return None
+        quantity = (await self._inventory_quantities_map([variant])).get(variant.id)
+        return self._variant_to_response(variant, quantity_available=quantity)
+
+    async def update_product_variant(
+        self, product_id: str, variant_id: str, variant_data: ProductVariantUpdate
+    ) -> ProductVariantResponse:
+        """
+        Partially update a product variant.
+
+        Args:
+            product_id: The parent product ID.
+            variant_id: The variant ID.
+            variant_data: Fields to update (only set fields are applied).
+
+        Returns:
+            The updated variant response.
+
+        Raises:
+            ValueError: If product or variant not found or invalid UUID.
+        """
+        try:
+            product_uuid = to_uuid(product_id)
+            variant_uuid = to_uuid(variant_id)
+        except ValueError:
+            raise ValueError("Invalid product or variant ID format")
+
+        result = await self._db.execute(
+            select(ProductVariant).where(
+                ProductVariant.id == variant_uuid,
+                ProductVariant.product_id == product_uuid,
+            )
+        )
+        variant = result.scalar_one_or_none()
+        if variant is None:
+            raise ValueError("Product variant not found")
+
+        update_data = variant_data.model_dump(exclude_unset=True)
+        if "attributes" in update_data:
+            update_data["attributes"] = json.dumps(update_data["attributes"] or {})
+        for key, value in update_data.items():
+            setattr(variant, key, value)
+
+        await self._db.commit()
+        await self._db.refresh(variant)
+        quantity = (await self._inventory_quantities_map([variant])).get(variant.id)
+        return self._variant_to_response(variant, quantity_available=quantity)
 
     async def list_product_variants(self, product_id: str) -> list[ProductVariantResponse]:
         """
@@ -1014,7 +1143,13 @@ class CatalogServiceImpl(CatalogService):
             price_override_amount=variant.price_override_amount,
             price_override_currency=variant.price_override_currency,
             inventory_policy=variant.inventory_policy,
-            quantity_available=quantity_available,
+            # Only tracked variants have a meaningful stock count; untracked /
+            # unlimited variants report None so buyers never see "sold out".
+            quantity_available=(
+                quantity_available
+                if variant.inventory_policy == InventoryPolicy.TRACKED.value
+                else None
+            ),
             created_at=variant.created_at,
             updated_at=variant.updated_at,
         )

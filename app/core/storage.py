@@ -10,7 +10,7 @@ Public functions:
 * ``build_key``           – deterministic S3 key generator.
 * ``presign_upload``      – generate a presigned POST (enforces content-type
                             and content-length-range on browser uploads).
-* ``presign_download``    – short-lived (300 s) presigned GET URL.
+* ``presign_download``    – configurable-expiry presigned GET URL.
 * ``inspect_object``      – fetch object metadata for validation.
 * ``signature_matches``   – constant-time equality check for checksum headers.
 * ``delete_object``       – delete a single object from S3.
@@ -69,10 +69,15 @@ def _s3_client():
         }
         if session_token:
             credentials["aws_session_token"] = session_token
+    region = settings.AWS_REGION.strip()
     return boto3.client(
         "s3",
-        region_name=settings.AWS_REGION.strip(),
-        config=Config(signature_version="s3v4"),
+        region_name=region,
+        endpoint_url=f"https://s3.{region}.amazonaws.com",
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "virtual"},
+        ),
         **credentials,
     )
 
@@ -138,7 +143,7 @@ def presign_download(
     inline: bool = False,
 ) -> str:
     """
-    Generate a short-lived presigned URL to download an object.
+    Generate a short-lived presigned URL to read an object inline or download it.
 
     The URL is never persisted — the caller gets it, fetches the object, and
     the link expires (default 300 s).

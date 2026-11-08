@@ -32,6 +32,7 @@ from app.schemas.catalog import (
     ProductUpdate,
     ProductVariantCreate,
     ProductVariantResponse,
+    ProductVariantUpdate,
 )
 from fastapi import (
     APIRouter,
@@ -377,6 +378,58 @@ async def create_product_variant(
 
     await finalize_idempotency(
         request, None, status_code=status.HTTP_201_CREATED, response_body=response_data.model_dump()
+    )
+    return response_data
+
+
+@router.get(
+    "/products/{product_id}/variants/{variant_id}",
+    response_model=ProductVariantResponse,
+)
+async def get_product_variant(
+    product_id: str,
+    variant_id: str,
+    service: CatalogService = get_catalog_service_depends,
+):
+    """Get a single product variant by ID."""
+    variant = await service.get_product_variant(product_id, variant_id)
+    if not variant:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Variant not found",
+        )
+    return variant
+
+
+@router.patch(
+    "/products/{product_id}/variants/{variant_id}",
+    response_model=ProductVariantResponse,
+)
+async def update_product_variant(
+    request: Request,
+    product_id: str,
+    variant_id: str,
+    variant_data: ProductVariantUpdate,
+    current_user: dict = get_current_active_user_depends,
+    service: CatalogService = get_catalog_service_depends,
+    idempotency: dict = get_idempotency_depends,
+):
+    """Partially update a product variant (sku, attributes, price override, stock policy)."""
+    if current_user.role.value not in ["merchant_owner", "merchant_staff", "platform_admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions",
+        )
+
+    try:
+        response_data = await service.update_product_variant(product_id, variant_id, variant_data)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        )
+
+    await finalize_idempotency(
+        request, None, status_code=status.HTTP_200_OK, response_body=response_data.model_dump()
     )
     return response_data
 

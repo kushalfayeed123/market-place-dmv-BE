@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from moto import mock_aws
@@ -167,7 +168,6 @@ class TestCheckMagic:
         [
             ("application/pdf", b"%PDF-"),
             ("application/epub+zip", b"PK\x03\x04"),
-            ("application/msword", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"),
             (
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 b"PK\x03\x04",
@@ -198,7 +198,6 @@ class TestPresignedUpload:
         [
             "application/pdf",
             "application/epub+zip",
-            "application/msword",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ],
     )
@@ -217,7 +216,12 @@ class TestPresignedUpload:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "content_type",
-        ["image/png", "video/mp4", "application/octet-stream"],
+        [
+            "image/png",
+            "video/mp4",
+            "application/octet-stream",
+            "application/msword",
+        ],
     )
     async def test_digital_product_rejects_non_document_content_types(
         self, service, test_merchant, content_type
@@ -376,6 +380,27 @@ class TestDigitalProductUpload:
         assert exc_info.value.status_code == 422
 
     @pytest.mark.asyncio
+    async def test_upload_rejects_legacy_doc(self, service, test_product, db):
+        from fastapi import HTTPException
+
+        await db.execute(
+            product_product_types.insert().values(
+                product_id=test_product.id,
+                product_type="digital",
+            )
+        )
+        await db.commit()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.upload_digital_product_file(
+                product_id_str=str(test_product.id),
+                file_data=b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
+                original_filename="guide.doc",
+            )
+
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
     async def test_multipart_upload_route_stores_file_on_backend(
         self, client, test_user, test_product, db
     ):
@@ -402,8 +427,9 @@ class TestDigitalProductUpload:
 
     @pytest.mark.asyncio
     async def test_buyer_must_have_paid_for_product_to_get_file_url(
-        self, client, test_user, test_merchant, test_product, db
+        self, client, test_user, test_merchant, test_product, db, monkeypatch
     ):
+        monkeypatch.setattr(settings, "S3_DOWNLOAD_URL_TTL_SECONDS", 43200)
         await db.execute(
             product_product_types.insert().values(
                 product_id=test_product.id,
@@ -463,7 +489,14 @@ class TestDigitalProductUpload:
         await db.commit()
         authorized = await client.get(path)
         assert authorized.status_code == 200
-        assert authorized.json()["download_url"]
+        response_body = authorized.json()
+        assert response_body["expires_in"] == 43200
+        assert response_body["filename"] == "test.pdf"
+        assert response_body["content_type"] == "application/pdf"
+        assert response_body["format"] == "pdf"
+        query = parse_qs(urlparse(response_body["download_url"]).query)
+        assert query["X-Amz-Expires"] == ["43200"]
+        assert query["response-content-disposition"] == ["inline"]
 
 
 class TestCompleteUpload:
@@ -1062,6 +1095,7 @@ class TestS3Client:
         monkeypatch.setattr(storage_mod.settings, "AWS_REGION", " us-east-1 ")
         monkeypatch.setattr(storage_mod.settings, "AWS_ACCESS_KEY_ID", " test-access ")
         monkeypatch.setattr(storage_mod.settings, "AWS_SECRET_ACCESS_KEY", " test-secret ")
+        monkeypatch.setattr(storage_mod.settings, "AWS_SESSION_TOKEN", " test-session ")
         monkeypatch.setattr(
             storage_mod.boto3,
             "client",
@@ -1074,3 +1108,26 @@ class TestS3Client:
         assert captured["region_name"] == "us-east-1"
         assert captured["aws_access_key_id"] == "test-access"
         assert captured["aws_secret_access_key"] == "test-secret"
+        assert captured["aws_session_token"] == "test-session"
+
+    def test_presigned_download_uses_regional_virtual_host(self, monkeypatch):
+        import app.core.storage as storage_mod
+        from urllib.parse import parse_qs, urlparse
+
+        monkeypatch.setattr(storage_mod.settings, "AWS_REGION", "eu-north-1")
+        monkeypatch.setattr(storage_mod.settings, "AWS_ACCESS_KEY_ID", "test-access")
+        monkeypatch.setattr(storage_mod.settings, "AWS_SECRET_ACCESS_KEY", "test-secret")
+        monkeypatch.setattr(storage_mod.settings, "AWS_SESSION_TOKEN", "")
+
+        url = storage_mod.presign_download(
+            bucket="reader-test-bucket",
+            key="digital_product/test.pdf",
+            ttl_seconds=43200,
+            inline=True,
+        )
+
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        assert parsed.hostname == "reader-test-bucket.s3.eu-north-1.amazonaws.com"
+        assert query["X-Amz-Expires"] == ["43200"]
+        assert query["response-content-disposition"] == ["inline"]

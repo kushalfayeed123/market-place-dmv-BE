@@ -574,8 +574,11 @@ KYC_ENFORCEMENT_ENABLED=false          # off locally per earlier decision
 AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE  # required for S3 operations
 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 AWS_REGION=eu-north-1
+AWS_SESSION_TOKEN=                 # optional; required with temporary AWS credentials
 S3_BUCKET=marketplace-dev
 ```
+
+Digital product objects stay private. The buyer-authorized reader endpoint creates an inline S3 presigned URL with a 12-hour expiry on each read; the frontend keeps it in memory only. EPUB and DOCX readers fetch the object from the browser, so configure the bucket CORS policy to allow `GET` from the deployed frontend origin. PDF uses the inline URL in the browser viewer. Reader controls discourage downloads but cannot prevent screenshots or copying.
 
 ### 7.3 Migrations & seed data
 

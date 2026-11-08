@@ -119,6 +119,12 @@ class OrderServiceImpl(OrderService):
             if product.fulfillment_type == "physical" or "physical" in product_types:
                 requires_delivery = True
 
+            # Digital products and services are single-unit: only one copy per order.
+            if ({"digital", "service"} & (product_types | {product.fulfillment_type})) and cart_item.quantity > 1:
+                raise ValueError(
+                    f"Only one copy of '{product.title}' can be ordered (digital/service product)"
+                )
+
             # Check inventory if tracked
             if variant.inventory_policy == "tracked":
                 result = await self._db.execute(

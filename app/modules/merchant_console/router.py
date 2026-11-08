@@ -168,19 +168,20 @@ async def get_merchant_attention(
         )
     )
 
+    # Only tracked variants have a stock count; untracked/unlimited variants
+    # (e.g. digital products and services) must not count as low stock.
+    tracked_variant_ids = select(ProductVariant.id).where(
+        ProductVariant.product_id == Product.id,
+        ProductVariant.inventory_policy == InventoryPolicy.TRACKED.value,
+    )
     low_stock_by_inv = await db.scalar(
         select(func.count())
         .select_from(Product)
         .where(Product.merchant_id == mid)
+        .where(tracked_variant_ids.exists())
         .where(
             select(func.coalesce(func.sum(Inventory.quantity_available), 0))
-            .where(
-                Inventory.variant_id.in_(
-                    select(ProductVariant.id).where(
-                        ProductVariant.product_id == Product.id
-                    )
-                )
-            )
+            .where(Inventory.variant_id.in_(tracked_variant_ids))
             .scalar_subquery()
             <= 0
         )

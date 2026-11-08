@@ -102,6 +102,18 @@ class ProductVariantCreate(BaseModel):
     quantity_reserved: int | None = Field(None, ge=0)
 
 
+class ProductVariantUpdate(BaseModel):
+    """Partial-update schema for product variants. All fields are optional."""
+
+    sku: str | None = Field(None, min_length=1)
+    attributes: dict[str, Any] | None = None
+    price_override_amount: int | None = Field(None, ge=0)
+    price_override_currency: str | None = Field(None, min_length=3, max_length=3)
+    inventory_policy: str | None = Field(None, pattern="^(tracked|untracked|unlimited)$")
+
+    model_config = {"extra": "forbid"}
+
+
 class DigitalProductFileResponse(BaseModel):
     """Private product file reference; the URL checks purchase access."""
 

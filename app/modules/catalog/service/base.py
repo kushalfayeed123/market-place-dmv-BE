@@ -15,6 +15,7 @@ from app.schemas.catalog import (
     ProductUpdate,
     ProductVariantCreate,
     ProductVariantResponse,
+    ProductVariantUpdate,
 )
 
 
@@ -158,6 +159,42 @@ class CatalogService(ABC):
             
         Raises:
             ValueError: If product not found.
+        """
+        ...
+
+    @abstractmethod
+    async def get_product_variant(
+        self, product_id: str, variant_id: str
+    ) -> ProductVariantResponse | None:
+        """
+        Get a single variant of a product.
+
+        Args:
+            product_id: The parent product ID.
+            variant_id: The variant ID.
+
+        Returns:
+            The variant response if found, None otherwise.
+        """
+        ...
+
+    @abstractmethod
+    async def update_product_variant(
+        self, product_id: str, variant_id: str, variant_data: ProductVariantUpdate
+    ) -> ProductVariantResponse:
+        """
+        Partially update a product variant.
+
+        Args:
+            product_id: The parent product ID.
+            variant_id: The variant ID.
+            variant_data: Fields to update (only set fields are applied).
+
+        Returns:
+            The updated variant response.
+
+        Raises:
+            ValueError: If product or variant not found.
         """
         ...
 

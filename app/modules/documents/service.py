@@ -70,7 +70,6 @@ ALLOWED_CONTENT_TYPES: dict[str, set[str]] = {
     DocumentPurpose.DIGITAL_PRODUCT.value: {
         "application/pdf",
         "application/epub+zip",
-        "application/msword",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     },
 }
@@ -78,7 +77,6 @@ ALLOWED_CONTENT_TYPES: dict[str, set[str]] = {
 MAGIC_SIGNATURES: dict[str, bytes] = {
     "application/pdf": b"%PDF-",
     "application/epub+zip": b"PK\x03\x04",
-    "application/msword": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": b"PK\x03\x04",
     "image/png": b"\x89PNG\r\n\x1a\n",
     "image/jpeg": b"\xff\xd8\xff",
@@ -91,7 +89,6 @@ MAGIC_SIGNATURES: dict[str, bytes] = {
 DIGITAL_PRODUCT_TYPES_BY_EXTENSION: dict[str, str] = {
     ".pdf": "application/pdf",
     ".epub": "application/epub+zip",
-    ".doc": "application/msword",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
@@ -753,7 +750,7 @@ class DocumentService:
         if content_type is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="File must be a PDF, EPUB, or Word document (.doc or .docx).",
+                detail="File must be a PDF, EPUB, or Word document (.docx).",
             )
 
         max_bytes = settings.S3_MAX_UPLOAD_MB * 1024 * 1024
