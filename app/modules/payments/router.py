@@ -192,6 +192,11 @@ async def list_payment_methods(
     current_user: dict = get_current_active_user_depends,
     merchant_id: str | None = Query(None, description="Merchant ID to filter currency"),
     currency: str | None = Query(None, description="ISO 4217 currency to filter providers"),
+    fulfillment: str | None = Query(
+        None,
+        description="Fulfillment of the order being paid for ('delivery', 'pickup', 'digital', 'service'). "
+        "Pay on Delivery is only offered for physical orders (delivery/pickup).",
+    ),
 ):
     """List available payment providers.
 
@@ -201,24 +206,27 @@ async def list_payment_methods(
     render them as disabled buttons.
 
     The ``currency`` query parameter filters the list to providers that
-    support a given currency.
+    support a given currency.  The ``fulfillment`` query parameter hides
+    Pay on Delivery for non-physical (digital/service) orders.
     """
     from app.modules.payments.providers.registry import get_available_providers
 
     providers = get_available_providers(currency)
 
     # Pay on Delivery is a merchant-confirmed payment method, not an online
-    # provider, so it is not in the provider registry.  It is always shown as
-    # an available (implemented) option for every currency.
-    providers = [
-        *providers,
-        PaymentProviderInfo(
-            key="pay_on_delivery",
-            name="Pay on Delivery",
-            implemented=True,
-            supported_currencies=["NGN", "USD", "GBP", "EUR", "KES", "ZAR"],
-        ),
-    ]
+    # provider, so it is not in the provider registry.  It only makes sense
+    # for physical goods (delivery or pickup), so it is hidden for
+    # digital/service orders when the caller passes ``fulfillment``.
+    if fulfillment in (None, "delivery", "pickup"):
+        providers = [
+            *providers,
+            PaymentProviderInfo(
+                key="pay_on_delivery",
+                name="Pay on Delivery",
+                implemented=True,
+                supported_currencies=["NGN", "USD", "GBP", "EUR", "KES", "ZAR"],
+            ),
+        ]
     return [
         PaymentProviderInfo(
             key=p.key,

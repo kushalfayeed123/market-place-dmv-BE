@@ -496,3 +496,56 @@ async def test_pay_on_delivery_marks_order_awaiting_approval(
     order_resp = await client.get(f"/api/v1/orders/{order_id}", headers=buyer_headers)
     assert order_resp.status_code == 200
     assert order_resp.json()["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_payment_methods_fulfillment_filter(
+    client: AsyncClient, buyer_headers: dict
+):
+    """Pay on Delivery is advertised for physical orders only.
+
+    Without a fulfillment hint it stays listed (backward compatible); with
+    fulfillment=digital/service it must be hidden; with delivery/pickup shown.
+    """
+    resp = await client.get("/api/v1/payments/methods", headers=buyer_headers)
+    assert resp.status_code == 200
+    assert "pay_on_delivery" in {m["key"] for m in resp.json()}
+
+    for fulfillment, expected in [("delivery", True), ("pickup", True), ("digital", False), ("service", False)]:
+        resp = await client.get(
+            f"/api/v1/payments/methods?fulfillment={fulfillment}", headers=buyer_headers
+        )
+        assert resp.status_code == 200
+        keys = {m["key"] for m in resp.json()}
+        assert ("pay_on_delivery" in keys) is expected, fulfillment
+
+
+@pytest.mark.asyncio
+async def test_pay_on_delivery_rejected_for_digital_order(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict, db
+):
+    """Pay on Delivery must not be accepted for orders without physical items."""
+    from sqlalchemy import update
+
+    await db.execute(
+        update(Product)
+        .where(Product.id == uuid.UUID(seed_data["product_id"]))
+        .values(fulfillment_type="digital")
+    )
+    await db.commit()
+
+    checkout_resp = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": seed_data["variant_id"], "quantity": 1}]},
+        headers={**buyer_headers, "Idempotency-Key": "digital-pod-checkout"},
+    )
+    assert checkout_resp.status_code == 201, checkout_resp.text
+    order_id = checkout_resp.json()["id"]
+
+    pay_resp = await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": order_id, "provider": "pay_on_delivery"},
+        headers={**buyer_headers, "Idempotency-Key": "digital-pod-pay"},
+    )
+    assert pay_resp.status_code == 400, pay_resp.text
+    assert "physical" in pay_resp.json()["detail"].lower()

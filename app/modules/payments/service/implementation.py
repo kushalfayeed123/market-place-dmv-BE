@@ -12,6 +12,7 @@ from app.models.notification import NotificationChannel, NotificationType
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
+from app.models.product import Product
 from app.models.webhook_event import WebhookEvent
 from app.modules.notifications.service.base import NotificationService
 from app.modules.payments.providers.registry import (
@@ -124,6 +125,19 @@ class PaymentServiceImpl(PaymentService):
             ):
                 raise ValueError(
                     f"Order cannot use Pay on Delivery in status '{order.status}'"
+                )
+
+            # Pay on Delivery only makes sense for physical goods — a digital
+            # download or service cannot be "paid for on delivery".
+            kind_result = await self._db.execute(
+                select(Product.fulfillment_type)
+                .join(OrderItem, OrderItem.product_id == Product.id)
+                .where(OrderItem.order_id == order.id)
+            )
+            kinds = {row[0] for row in kind_result.all()}
+            if "physical" not in kinds:
+                raise ValueError(
+                    "Pay on Delivery is only available for orders with physical products."
                 )
 
             payment_transaction = PaymentTransaction(
