@@ -170,8 +170,13 @@ class FulfillmentServiceImpl(FulfillmentService):
         Returns:
             List of fulfillment responses.
         """
+        from app.modules.orders.lookup import get_order_by_ref
+
+        order = await get_order_by_ref(self._db, order_id)
+        if order is None:
+            return []
         result = await self._db.execute(
-            select(Fulfillment).where(Fulfillment.order_id == to_uuid(order_id))
+            select(Fulfillment).where(Fulfillment.order_id == order.id)
         )
         fulfillments = result.scalars().all()
 

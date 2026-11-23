@@ -15,6 +15,7 @@ from app.models.payment_transaction import PaymentTransaction
 from app.models.product import Product
 from app.models.webhook_event import WebhookEvent
 from app.modules.notifications.service.base import NotificationService
+from app.modules.orders.lookup import get_order_by_ref
 from app.modules.payments.providers.registry import (
     is_provider_implemented,
     get_provider,
@@ -67,11 +68,8 @@ class PaymentServiceImpl(PaymentService):
         Raises:
             ValueError: If order not found or not authorized.
         """
-        # Verify order exists
-        result = await self._db.execute(
-            select(Order).where(Order.id == to_uuid(payment_data.order_id))
-        )
-        order = result.scalar_one_or_none()
+        # Verify order exists — accepts a UUID or an order number (ORD-…)
+        order = await get_order_by_ref(self._db, payment_data.order_id)
 
         if not order:
             raise ValueError("Order not found")
@@ -270,11 +268,8 @@ class PaymentServiceImpl(PaymentService):
         Raises:
             ValueError: If the order exists but the user is not the buyer.
         """
-        # Verify the order exists and the user owns it
-        result = await self._db.execute(
-            select(Order).where(Order.id == to_uuid(order_id))
-        )
-        order = result.scalar_one_or_none()
+        # Verify the order exists and the user owns it (UUID or order number)
+        order = await get_order_by_ref(self._db, order_id)
 
         if not order:
             raise ValueError("Order not found")
@@ -285,7 +280,7 @@ class PaymentServiceImpl(PaymentService):
         # Get the most recent payment for this order
         result = await self._db.execute(
             select(PaymentTransaction)
-            .where(PaymentTransaction.order_id == to_uuid(order_id))
+            .where(PaymentTransaction.order_id == order.id)
             .order_by(
                 case(
                     (PaymentTransaction.status == "refunded", 0),
@@ -317,11 +312,11 @@ class PaymentServiceImpl(PaymentService):
     async def verify_payment_by_order(
         self, order_id: str, user_id: str
     ) -> PaymentResponse | None:
-        """Verify and persist a pending provider payment for its buyer."""
-        order_result = await self._db.execute(
-            select(Order).where(Order.id == to_uuid(order_id))
-        )
-        order = order_result.scalar_one_or_none()
+        """Verify and persist a pending provider payment for its buyer.
+
+        ``order_id`` may be the order's UUID or its order number.
+        """
+        order = await get_order_by_ref(self._db, order_id)
         if order is None:
             raise ValueError("Order not found")
         if order.buyer_id != to_uuid(user_id):

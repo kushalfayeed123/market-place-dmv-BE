@@ -29,6 +29,7 @@ from app.models.product_like import ProductLike  # noqa: F401
 from app.models.product_variant import ProductVariant  # noqa: F401
 from app.models.payout import Payout  # noqa: F401
 from app.models.refresh_token import RefreshToken  # noqa: F401
+from app.models.share_link import ShareLink, share_link_products  # noqa: F401
 from app.models.store import Store  # noqa: F401
 from app.models.user import User  # noqa: F401
 from app.models.webhook_event import WebhookEvent  # noqa: F401

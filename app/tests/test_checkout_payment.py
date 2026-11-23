@@ -499,6 +499,47 @@ async def test_pay_on_delivery_marks_order_awaiting_approval(
 
 
 @pytest.mark.asyncio
+async def test_get_order_accepts_order_number(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict
+):
+    """GET /orders/{order_id} must accept the human-readable order number
+    (e.g. ORD-20261109-190345-17ec), not just the UUID — previously this
+    raised ValueError('Invalid UUID') → 500. Buyers and the agent reference
+    orders by order number."""
+    checkout_resp = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": seed_data["variant_id"], "quantity": 1}], "fulfillment_option": "pickup"},
+        headers={**buyer_headers, "Idempotency-Key": "order-number-lookup-checkout"},
+    )
+    assert checkout_resp.status_code == 201, checkout_resp.text
+    body = checkout_resp.json()
+    order_id, order_number = body["id"], body["order_number"]
+    assert order_number.startswith("ORD-")
+
+    # By UUID (existing behavior)
+    by_id = await client.get(f"/api/v1/orders/{order_id}", headers=buyer_headers)
+    assert by_id.status_code == 200, by_id.text
+
+    # By order number (the bug — used to 500)
+    by_number = await client.get(f"/api/v1/orders/{order_number}", headers=buyer_headers)
+    assert by_number.status_code == 200, by_number.text
+    assert by_number.json()["id"] == order_id
+    assert by_number.json()["order_number"] == order_number
+
+    # Order detail must include the actual products (names, not just ids)
+    items = by_number.json()["items"]
+    assert len(items) == 1
+    assert items[0]["product_name"] == "Test Product"
+    assert items[0]["quantity"] == 1
+    assert items[0]["unit_price"] == 10000
+    assert items[0]["line_total"] == 10000
+
+    # Unknown reference → clean 404, not a 500
+    missing = await client.get("/api/v1/orders/ORD-99999999-999999-zzzz", headers=buyer_headers)
+    assert missing.status_code == 404, missing.text
+
+
+@pytest.mark.asyncio
 async def test_payment_methods_fulfillment_filter(
     client: AsyncClient, buyer_headers: dict
 ):

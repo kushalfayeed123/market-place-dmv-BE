@@ -17,6 +17,7 @@ from app.modules.documents.router import router as documents_router
 from app.modules.fulfillment.router import router as fulfillment_router
 from app.modules.knowledge.router import router as knowledge_router
 from app.modules.ledger.router import router as ledger_router
+from app.modules.links.router import router as links_router
 from app.modules.merchant_console.agent_router import router as agent_router
 from app.modules.merchant_console.router import router as merchant_console_router
 from app.modules.merchants.router import router as merchants_router
@@ -72,6 +73,7 @@ app.include_router(orders_router, prefix=f"{settings.API_V1_STR}/orders", tags=[
 app.include_router(payments_router, prefix=f"{settings.API_V1_STR}/payments", tags=["payments"])
 app.include_router(product_attributes_router, prefix=f"{settings.API_V1_STR}/product-attribute-schemas", tags=["product-attribute-schemas"])
 app.include_router(ledger_router, prefix=f"{settings.API_V1_STR}/ledger", tags=["ledger"])
+app.include_router(links_router, prefix=f"{settings.API_V1_STR}/links", tags=["links"])
 app.include_router(fulfillment_router, prefix=f"{settings.API_V1_STR}/fulfillment", tags=["fulfillment"])
 app.include_router(knowledge_router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["knowledge"])
 app.include_router(notifications_router, prefix=f"{settings.API_V1_STR}/notifications", tags=["notifications"])

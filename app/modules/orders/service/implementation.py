@@ -5,6 +5,7 @@ Handles database operations for orders using SQLAlchemy.
 """
 
 
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -19,7 +20,21 @@ from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
 from app.models.product import Product, product_product_types
 from app.models.product_variant import ProductVariant
+
+
+def _variant_label(variant: ProductVariant | None) -> str | None:
+    """Human label for a variant: prefer its attributes (e.g. Size: M), else SKU."""
+    if variant is None:
+        return None
+    try:
+        attrs = json.loads(variant.attributes) if variant.attributes else {}
+    except (ValueError, TypeError):
+        attrs = {}
+    if isinstance(attrs, dict) and attrs:
+        return ", ".join(f"{k}: {v}" for k, v in attrs.items())
+    return variant.sku or None
 from app.modules.notifications.service.base import NotificationService
+from app.modules.orders.lookup import get_order_by_ref
 from app.modules.orders.service.base import OrderService
 from app.schemas.notification import NotificationCreate
 from app.schemas.orders import (
@@ -285,11 +300,11 @@ class OrderServiceImpl(OrderService):
 
         Returns:
             The order response if found, None otherwise.
+
+        ``order_id`` may be the order's UUID or its human-readable order
+        number (e.g. ORD-20261109-190345-17ec).
         """
-        result = await self._db.execute(
-            select(Order).where(Order.id == to_uuid(order_id))
-        )
-        order = result.scalar_one_or_none()
+        order = await get_order_by_ref(self._db, order_id)
 
         if order is None:
             return None
@@ -303,6 +318,22 @@ class OrderServiceImpl(OrderService):
 
         result = await self._db.execute(query)
         order_items = result.scalars().all()
+
+        # Batch-load products + variants so each line carries its actual
+        # product name / variant label / SKU (the order_items table stores
+        # only ids and prices).
+        pids = [it.product_id for it in order_items]
+        vids = [it.variant_id for it in order_items if it.variant_id]
+        products = (
+            (await self._db.execute(select(Product).where(Product.id.in_(pids)))).scalars().all()
+            if pids else []
+        )
+        variants = (
+            (await self._db.execute(select(ProductVariant).where(ProductVariant.id.in_(vids)))).scalars().all()
+            if vids else []
+        )
+        prod_map = {str(p.id): p for p in products}
+        variant_map = {str(v.id): v for v in variants}
 
         # Fetch merchant name from the first item's merchant
         merchant_name = None
@@ -358,7 +389,10 @@ class OrderServiceImpl(OrderService):
                 {
                     "id": str(item.id),
                     "product_id": str(item.product_id),
+                    "product_name": (prod_map.get(str(item.product_id)).title if prod_map.get(str(item.product_id)) else None) or "Product",
                     "variant_id": str(item.variant_id) if item.variant_id else None,
+                    "variant_name": _variant_label(variant_map.get(str(item.variant_id))) if item.variant_id else None,
+                    "sku": (variant_map.get(str(item.variant_id)).sku if item.variant_id and variant_map.get(str(item.variant_id)) else None),
                     "merchant_id": str(item.merchant_id),
                     "quantity": item.quantity,
                     "unit_price": item.unit_price,
@@ -420,6 +454,30 @@ class OrderServiceImpl(OrderService):
             )
             order_items = result.scalars().all()
 
+            # Batch-load products, variants and the merchant for names —
+            # the buyer's order list must show the actual merchant/product.
+            pids = [it.product_id for it in order_items]
+            vids = [it.variant_id for it in order_items if it.variant_id]
+            products = (
+                (await self._db.execute(select(Product).where(Product.id.in_(pids)))).scalars().all()
+                if pids else []
+            )
+            variants = (
+                (await self._db.execute(select(ProductVariant).where(ProductVariant.id.in_(vids)))).scalars().all()
+                if vids else []
+            )
+            prod_map = {str(p.id): p for p in products}
+            variant_map = {str(v.id): v for v in variants}
+            merchant_name = None
+            merchant_id_str = None
+            if order_items:
+                mid = order_items[0].merchant_id
+                merchant_id_str = str(mid)
+                m_result = await self._db.execute(select(Merchant).where(Merchant.id == mid))
+                m = m_result.scalar_one_or_none()
+                if m:
+                    merchant_name = m.business_name
+
             responses.append(
                 OrderResponse(
                     id=str(order.id),
@@ -430,13 +488,18 @@ class OrderServiceImpl(OrderService):
                     total_amount=order.total_amount,
                     idempotency_key=order.idempotency_key,
                     item_count=sum(item.quantity for item in order_items),
+                    merchant_id=merchant_id_str,
+                    merchant_name=merchant_name,
                     created_at=order.created_at,
                     updated_at=order.updated_at,
                     items=[
                         {
                             "id": str(item.id),
                             "product_id": str(item.product_id),
+                            "product_name": (prod_map.get(str(item.product_id)).title if prod_map.get(str(item.product_id)) else None) or "Product",
                             "variant_id": str(item.variant_id) if item.variant_id else None,
+                            "variant_name": _variant_label(variant_map.get(str(item.variant_id))) if item.variant_id else None,
+                            "sku": (variant_map.get(str(item.variant_id)).sku if item.variant_id and variant_map.get(str(item.variant_id)) else None),
                             "merchant_id": str(item.merchant_id),
                             "quantity": item.quantity,
                             "unit_price": item.unit_price,
@@ -462,11 +525,10 @@ class OrderServiceImpl(OrderService):
         a sale ledger entry (debit platform_rev) and a payout_hold entry
         (credit to the merchant wallet), then transitions the order to
         'awaiting_approval'.
+
+        ``order_id`` may be the order's UUID or its order number.
         """
-        result = await self._db.execute(
-            select(Order).where(Order.id == to_uuid(order_id))
-        )
-        order = result.scalar_one_or_none()
+        order = await get_order_by_ref(self._db, order_id)
         if order is None:
             raise ValueError("Order not found")
         if str(order.buyer_id) != str(buyer_id):
@@ -550,11 +612,10 @@ class OrderServiceImpl(OrderService):
         not yet confirmed) or 'pending'/'awaiting_approval' (online payment
         awaiting webhook confirmation or proof-of-payment on file); in
         all cases the merchant is confirming payment has been received.
+
+        ``order_id`` may be the order's UUID or its order number.
         """
-        result = await self._db.execute(
-            select(Order).where(Order.id == to_uuid(order_id))
-        )
-        order = result.scalar_one_or_none()
+        order = await get_order_by_ref(self._db, order_id)
         if order is None:
             raise ValueError("Order not found")
 
@@ -679,11 +740,10 @@ class OrderServiceImpl(OrderService):
             ValueError: If the order is not found, not owned by the merchant,
                         not in a fulfillable status, or not all fulfillments
                         are delivered.
+
+        ``order_id`` may be the order's UUID or its order number.
         """
-        result = await self._db.execute(
-            select(Order).where(Order.id == to_uuid(order_id))
-        )
-        order = result.scalar_one_or_none()
+        order = await get_order_by_ref(self._db, order_id)
         if order is None:
             raise ValueError("Order not found")
 
