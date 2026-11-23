@@ -13,3 +13,4 @@ wheels/
 .env.example
 .env.local.example
 .vscode/
+backup_before_share_links.sql
