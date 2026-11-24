@@ -4,16 +4,21 @@ Concrete implementation of the payment service.
 Handles database operations for payments using SQLAlchemy.
 """
 
+import json
 import uuid
 
 from app.core.security import to_uuid
+from app.models.commission_plan import CommissionPlan
 from app.models.ledger_entry import LedgerDirection, LedgerEntry, LedgerEntryType
+from app.models.merchant import Merchant
+from app.models.merchant_payout_account import MerchantPayoutAccount
 from app.models.notification import NotificationChannel, NotificationType
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
 from app.models.product import Product
 from app.models.webhook_event import WebhookEvent
+from app.modules.payments.providers.base import SplitLeg
 from app.modules.notifications.service.base import NotificationService
 from app.modules.orders.lookup import get_order_by_ref
 from app.modules.payments.providers.registry import (
@@ -181,6 +186,13 @@ class PaymentServiceImpl(PaymentService):
         if provider is None:
             raise ValueError(f"Unknown payment provider '{provider_key}'")
 
+        # ── Multi-vendor split ─────────────────────────────────────────────
+        # One buyer transaction fans out to one leg per merchant (net of that
+        # merchant's commission) plus a platform leg that collects the
+        # commission. Falls back to a plain transaction for single-merchant
+        # orders or when the merchant has no provider subaccount.
+        split_code = await _create_order_split(self._db, order, provider)
+
         # Initialise the payment with the provider.
         # When Paystack credentials are not configured (dev/test), the provider
         # falls back to a local stub that returns a reference + mock URL.
@@ -190,10 +202,12 @@ class PaymentServiceImpl(PaymentService):
             currency=order.currency,
             buyer_email=None,
             metadata={"order_number": order.order_number},
+            split_code=split_code,
         )
 
         # Create payment transaction with the provider's reference
         # The webhook (not this endpoint) will update it to "success"
+        raw_payload = json.dumps({"split_code": split_code}) if split_code else None
         payment_transaction = PaymentTransaction(
             order_id=order.id,
             provider=payment_data.provider,
@@ -202,6 +216,7 @@ class PaymentServiceImpl(PaymentService):
             amount=order.total_amount,
             currency=order.currency,
             payment_url=init_result.payment_url,
+            raw_payload=raw_payload,
         )
 
         self._db.add(payment_transaction)
@@ -478,6 +493,101 @@ class PaymentServiceImpl(PaymentService):
 
         # Update original payment status
         payment_transaction.status = "refunded"
+
+        # ── Ledger: refund entries per merchant line item ──────────────────
+        # Each item's sale is reversed: refund debit against the merchant wallet
+        # (reduces their balance) and credit back to platform_revenue, grouped
+        # in one entry_group and linked to the original payment transaction.
+        # Partial refunds (one item in a multi-merchant order) map to that
+        # item's split leg. The design doc: "ledger records a refund entry
+        # against the specific merchant subaccount".
+        order = await self._db.get(Order, payment_transaction.order_id)
+        if order is not None:
+            group_id = uuid.uuid4()
+            items_res = await self._db.execute(
+                select(OrderItem).where(OrderItem.order_id == order.id)
+            )
+            order_items = items_res.scalars().all()
+            # Pro-rate the refund across items when the refund is partial.
+            total = sum(abs(i.line_total) for i in order_items) or 1
+            for item in order_items:
+                item_refund = (
+                    refund_amount
+                    if refund_amount == payment_transaction.amount
+                    else (abs(item.line_total) * refund_amount) // total
+                )
+                if item_refund <= 0:
+                    continue
+                # Refund debit against merchant wallet (reduces merchant balance)
+                self._db.add(
+                    LedgerEntry(
+                        entry_group_id=group_id,
+                        account_type="merchant_wallet",
+                        merchant_id=item.merchant_id,
+                        direction=LedgerDirection.DEBIT.value,
+                        entry_type=LedgerEntryType.REFUND.value,
+                        amount=item_refund,
+                        currency=item.currency,
+                        order_id=order.id,
+                        payment_transaction_id=payment_transaction.id,
+                        created_by="system",
+                    )
+                )
+                # Refund credit back to platform revenue
+                self._db.add(
+                    LedgerEntry(
+                        entry_group_id=group_id,
+                        account_type="platform_revenue",
+                        merchant_id=item.merchant_id,
+                        direction=LedgerDirection.CREDIT.value,
+                        entry_type=LedgerEntryType.REFUND.value,
+                        amount=item_refund,
+                        currency=item.currency,
+                        order_id=order.id,
+                        payment_transaction_id=payment_transaction.id,
+                        created_by="system",
+                    )
+                )
+            # Also reverse the merchant's payout_hold so held funds drop.
+            holds_res = await self._db.execute(
+                select(LedgerEntry).where(
+                    LedgerEntry.order_id == order.id,
+                    LedgerEntry.entry_type == LedgerEntryType.PAYOUT_HOLD.value,
+                    LedgerEntry.id.not_in(
+                        select(LedgerEntry.supersedes_entry_id).where(
+                            LedgerEntry.supersedes_entry_id.isnot(None)
+                        )
+                    ),
+                )
+            )
+            for hold in holds_res.scalars().all():
+                self._db.add(
+                    LedgerEntry(
+                        entry_group_id=group_id,
+                        account_type="merchant_wallet",
+                        merchant_id=hold.merchant_id,
+                        direction=LedgerDirection.DEBIT.value,
+                        entry_type=LedgerEntryType.PAYOUT_HOLD.value,
+                        amount=hold.amount,
+                        currency=hold.currency,
+                        order_id=order.id,
+                        supersedes_entry_id=hold.id,
+                        created_by="system",
+                    )
+                )
+
+        # Ask the provider to refund the transaction (best-effort; the webhook
+        # will confirm). Partial refunds pass the amount through.
+        provider = get_provider(payment_transaction.provider)
+        if provider is not None and hasattr(provider, "initiate_refund"):
+            try:
+                await provider.initiate_refund(
+                    payment_transaction.provider_reference,
+                    amount=refund_amount if refund_amount != payment_transaction.amount else None,
+                )
+            except Exception:
+                pass  # ledger already records the refund; provider sync is best-effort
+
         await self._db.commit()
         await self._db.refresh(refund_transaction)
 
@@ -561,6 +671,21 @@ class PaymentServiceImpl(PaymentService):
                         if o and o.status == "pending":
                             o.status = "paid"
                         await self._db.refresh(pt)
+
+                        # ── Ledger: per-item sale + commission + payout_hold ──
+                        # Online payments must credit merchant wallets too, not
+                        # just pay-on-delivery. Idempotent: skip when entries for
+                        # this payment transaction already exist.
+                        if o is not None:
+                            already = await self._db.execute(
+                                select(LedgerEntry.id).where(
+                                    LedgerEntry.payment_transaction_id == pt.id
+                                ).limit(1)
+                            )
+                            if already.scalar_one_or_none() is None:
+                                await post_order_ledger_entries(
+                                    self._db, o, pt, created_by=str(o.buyer_id)
+                                )
 
                         # ── Notifications: payment confirmed ──────────────
                         if self._notification_service:
@@ -657,23 +782,142 @@ class PaymentServiceImpl(PaymentService):
         )
 
 
-async def _create_payout_hold_entries(db, order, payment_transaction, created_by: str) -> None:
-    """Create payout-hold ledger entries per merchant line item.
+def compute_commission(line_total: int, plan: CommissionPlan | None) -> int:
+    """Commission owed to the platform for one line, in minor units.
 
-    Mirrors the ledger entries in ``submit_proof_of_payment`` so that
-    ``approve_order``'s payout-release balances against them.  Funds stay
-    held until the merchant confirms pay-on-delivery payment.
+    ``percentage_bps`` is basis points (1000 = 10%) plus an optional flat fee.
+    """
+    if plan is None or line_total <= 0:
+        return 0
+    pct = (line_total * plan.percentage_bps) // 10_000
+    return pct + (plan.flat_fee_minor or 0)
+
+
+async def _merchant_legs_for_order(db, order) -> list[tuple]:
+    """Group an order's items by merchant.
+
+    Returns a list of ``(merchant, subaccount_code, gross_total, plan)`` tuples.
+    """
+    from app.models.order_item import OrderItem
+
+    items = (
+        (await db.execute(select(OrderItem).where(OrderItem.order_id == order.id)))
+        .scalars()
+        .all()
+    )
+    by_merchant: dict = {}
+    for item in items:
+        by_merchant.setdefault(item.merchant_id, []).append(item)
+
+    legs = []
+    for merchant_id, merchant_items in by_merchant.items():
+        merchant = (
+            await db.execute(select(Merchant).where(Merchant.id == merchant_id))
+        ).scalar_one_or_none()
+        if merchant is None:
+            continue
+        plan = (
+            await db.execute(
+                select(CommissionPlan).where(CommissionPlan.id == merchant.commission_plan_id)
+            )
+        ).scalar_one_or_none()
+        account = (
+            await db.execute(
+                select(MerchantPayoutAccount).where(
+                    MerchantPayoutAccount.merchant_id == merchant_id,
+                    MerchantPayoutAccount.is_active.is_(True),
+                )
+            )
+        ).scalar_one_or_none()
+        subaccount_code = account.external_ref if account else None
+        gross = sum(abs(i.line_total) for i in merchant_items)
+        legs.append((merchant, subaccount_code, gross, plan))
+    return legs
+
+
+async def _create_order_split(db, order, provider) -> str | None:
+    """Build a provider transaction split for a multi-merchant order.
+
+    Each merchant gets a leg of ``gross - commission``; the platform keeps the
+    summed commission as its own leg. Single-merchant orders (or merchants
+    without a subaccount) skip the split and settle via the ledger only.
+    """
+    legs_data = await _merchant_legs_for_order(db, order)
+    if len(legs_data) < 2:
+        return None
+    if not hasattr(provider, "create_split"):
+        return None
+
+    split_legs: list[SplitLeg] = []
+    total_commission = 0
+    for merchant, subaccount_code, gross, plan in legs_data:
+        commission = compute_commission(gross, plan)
+        total_commission += commission
+        net = gross - commission
+        if subaccount_code and net > 0:
+            split_legs.append(
+                SplitLeg(
+                    subaccount=subaccount_code,
+                    amount=net,
+                    currency=order.currency,
+                    label=merchant.business_name,
+                )
+            )
+    if total_commission > 0:
+        # Platform leg — no subaccount, the provider's own account collects it.
+        split_legs.append(
+            SplitLeg(
+                subaccount=None,
+                amount=total_commission,
+                currency=order.currency,
+                label="platform_commission",
+            )
+        )
+    if not split_legs:
+        return None
+    result = await provider.create_split(
+        name=f"order_{order.order_number}", legs=split_legs, currency=order.currency
+    )
+    return result.split_code if result else None
+
+
+async def post_order_ledger_entries(db, order, payment_transaction, created_by: str) -> None:
+    """Post the full settlement ledger for an order, per line item.
+
+    For every order item this writes, in one ``entry_group_id``:
+      - ``sale``      debit  platform_revenue   (gross line_total)
+      - ``commission`` credit platform_revenue  (platform's cut, from the
+        merchant's commission plan)
+      - ``payout_hold`` credit merchant_wallet  (net = gross - commission,
+        held until the merchant approves / the order is delivered)
+
+    Used by the payment-success webhook AND the pay-on-delivery /
+    proof-of-payment paths, so every paid order credits merchant wallets —
+    multi-merchant orders simply produce one set of entries per merchant item.
     """
     group_id = uuid.uuid4()
-    # ``db`` is an AsyncSession, so ``execute`` must be awaited; without this the
-    # returned coroutine has no ``scalars`` method and pay-on-delivery raises
-    # AttributeError at runtime (Paystack never reaches this helper).
     items_result = await db.execute(
         select(OrderItem).where(OrderItem.order_id == order.id)
     )
     order_items = items_result.scalars().all()
 
     for item in order_items:
+        gross = abs(item.line_total)
+        plan = None
+        merchant = (
+            await db.execute(select(Merchant).where(Merchant.id == item.merchant_id))
+        ).scalar_one_or_none()
+        if merchant is not None:
+            plan = (
+                await db.execute(
+                    select(CommissionPlan).where(
+                        CommissionPlan.id == merchant.commission_plan_id
+                    )
+                )
+            ).scalar_one_or_none()
+        commission = compute_commission(gross, plan)
+        net = gross - commission
+
         # Sale entry (debit — platform records the sale)
         db.add(
             LedgerEntry(
@@ -682,14 +926,31 @@ async def _create_payout_hold_entries(db, order, payment_transaction, created_by
                 merchant_id=item.merchant_id,
                 direction=LedgerDirection.DEBIT.value,
                 entry_type=LedgerEntryType.SALE.value,
-                amount=abs(item.line_total),
+                amount=gross,
                 currency=item.currency,
                 order_id=order.id,
                 payment_transaction_id=payment_transaction.id,
                 created_by=str(created_by),
             )
         )
-        # Payout hold entry (credit — funds held for merchant until approval)
+        # Commission entry (credit — platform keeps its cut)
+        if commission > 0:
+            db.add(
+                LedgerEntry(
+                    entry_group_id=group_id,
+                    account_type="platform_revenue",
+                    merchant_id=item.merchant_id,
+                    direction=LedgerDirection.CREDIT.value,
+                    entry_type=LedgerEntryType.COMMISSION.value,
+                    amount=commission,
+                    currency=item.currency,
+                    order_id=order.id,
+                    payment_transaction_id=payment_transaction.id,
+                    created_by=str(created_by),
+                )
+            )
+        # Payout hold entry (credit — net funds held for the merchant until
+        # approval/delivery, then released by a superseding payout_release)
         db.add(
             LedgerEntry(
                 entry_group_id=group_id,
@@ -697,10 +958,20 @@ async def _create_payout_hold_entries(db, order, payment_transaction, created_by
                 merchant_id=item.merchant_id,
                 direction=LedgerDirection.CREDIT.value,
                 entry_type=LedgerEntryType.PAYOUT_HOLD.value,
-                amount=abs(item.line_total),
+                amount=net,
                 currency=item.currency,
                 order_id=order.id,
                 payment_transaction_id=payment_transaction.id,
                 created_by=str(created_by),
             )
         )
+
+
+async def _create_payout_hold_entries(db, order, payment_transaction, created_by: str) -> None:
+    """Back-compat wrapper — delegates to :func:`post_order_ledger_entries`.
+
+    Mirrors the ledger entries in ``submit_proof_of_payment`` so that
+    ``approve_order``'s payout-release balances against them.  Funds stay
+    held until the merchant confirms pay-on-delivery payment.
+    """
+    await post_order_ledger_entries(db, order, payment_transaction, created_by)

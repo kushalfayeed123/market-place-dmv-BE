@@ -36,6 +36,29 @@ class PaymentVerificationResult:
     currency: str
 
 
+@dataclass(frozen=True)
+class SplitLeg:
+    """One leg of a multi-merchant split.
+
+    ``subaccount`` is the provider-side subaccount code for a merchant leg;
+    the platform leg uses the provider's own account (subaccount omitted).
+    ``amount`` is in minor units and must be the leg's net amount.
+    """
+
+    subaccount: str | None
+    amount: int
+    currency: str
+    label: str = ""
+
+
+@dataclass(frozen=True)
+class SplitResult:
+    """Result of creating a transaction split with the provider."""
+
+    split_code: str
+    provider: str
+
+
 # ── Enum-like constants (kept as plain strings for DB / JSON compat) ─────────
 
 class PaymentStatus:
@@ -71,8 +94,13 @@ class PaymentProvider(abc.ABC):
         buyer_email: str | None = None,
         callback_url: str | None = None,
         metadata: dict | None = None,
+        split_code: str | None = None,
     ) -> PaymentInitResult:
         """Create a payment session / transaction with the provider.
+
+        ``split_code`` (when the provider supports transaction splits) fans a
+        single buyer transaction out to N merchant subaccounts + the platform
+        leg at settlement time — this is how multi-merchant orders settle.
 
         Returns a :class:`PaymentInitResult` with the provider reference and
         (optionally) a URL the buyer is redirected to.
@@ -88,4 +116,43 @@ class PaymentProvider(abc.ABC):
         self, provider_reference: str
     ) -> PaymentVerificationResult | None:
         """Return verified transaction details when the provider supports it."""
+        return None
+
+    async def create_subaccount(
+        self,
+        business_name: str,
+        bank_code: str | None = None,
+        account_number: str | None = None,
+        percentage_charge: float = 0.0,
+    ) -> str | None:
+        """Register a merchant subaccount; returns the provider subaccount code.
+
+        Optional — providers without subaccounts return ``None`` and the
+        platform settles to merchants from its own ledger instead.
+        """
+        return None
+
+    async def create_split(
+        self,
+        name: str,
+        legs: list[SplitLeg],
+        currency: str,
+    ) -> SplitResult | None:
+        """Create a transaction split (subaccounts + platform leg).
+
+        Returns the ``split_code`` to pass to :meth:`initialize_transaction`,
+        or ``None`` when the provider does not support splits.
+        """
+        return None
+
+    async def initiate_refund(
+        self, provider_reference: str, amount: int | None = None
+    ) -> bool:
+        """Refund (fully or partially) a successful transaction. Optional."""
+        return False
+
+    async def initiate_payout(
+        self, subaccount_code: str, amount: int, currency: str, reference: str
+    ) -> str | None:
+        """Transfer funds to a merchant subaccount/bank. Optional."""
         return None

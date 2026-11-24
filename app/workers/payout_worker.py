@@ -12,11 +12,13 @@ from typing import Optional
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import uuid
+
 from app.db.session import AsyncSessionLocal
-from app.models.ledger_entry import LedgerEntry
+from app.models.ledger_entry import LedgerDirection, LedgerEntry, LedgerEntryType
 from app.models.fulfillment import Fulfillment, FulfillmentStatus
 from app.models.order import Order
-from app.core.ledger_service import LedgerService  # Would be implemented in practice
+from app.models.payout import Payout
 
 logger = logging.getLogger(__name__)
 
@@ -72,17 +74,66 @@ class PayoutWorker:
                 logger.error(f"Error processing eligible payouts: {e}")
     
     async def release_payout_for_fulfillment(self, db: AsyncSession, fulfillment: Fulfillment):
-        """Release payout hold for a specific fulfillment."""
-        logger.info(f"Releasing payout for fulfillment {fulfillment.id}")
-        
-        # In a real implementation, this would:
-        # 1. Find the corresponding payout_hold ledger entry
-        # 2. Create a payout_release ledger entry that supersedes the hold
-        # 3. Update fulfillment status if needed
-        # 4. Optionally create a payout_paid entry when actually paid out
-        
-        # For now, we'll just log the action
-        logger.info(f"Would release payout for fulfillment {fulfillment.id} (order {fulfillment.order_id})")
+            """Release payout hold for a specific fulfillment.
+
+            1. Find the unreleased payout_hold entry for this order + merchant.
+            2. Create a payout_release ledger entry that supersedes it.
+            3. Update the Payout status to 'paid' if one exists.
+            4. Update fulfillment status to 'delivered' if it isn't already.
+            """
+            order = await self._db.get(Order, fulfillment.order_id)
+            if not order:
+                return
+
+            # Find the unreleased payout_hold entry for this order + merchant
+            hold_res = await db.execute(
+                select(LedgerEntry).where(
+                    LedgerEntry.order_id == order.id,
+                    LedgerEntry.merchant_id == fulfillment.merchant_id,
+                    LedgerEntry.entry_type == LedgerEntryType.PAYOUT_HOLD.value,
+                    LedgerEntry.id.not_in(
+                        select(LedgerEntry.supersedes_entry_id).where(
+                            LedgerEntry.supersedes_entry_id.isnot(None)
+                        )
+                    ),
+                )
+            )
+            holds = hold_res.scalars().all()
+
+            # Create payout_release entry for each unreleased hold
+            for hold in holds:
+                db.add(
+                    LedgerEntry(
+                        entry_group_id=uuid.uuid4(),
+                        account_type="merchant_wallet",
+                        merchant_id=fulfillment.merchant_id,
+                        direction=LedgerDirection.CREDIT.value,
+                        entry_type=LedgerEntryType.PAYOUT_RELEASE.value,
+                        amount=hold.amount,
+                        currency=hold.currency,
+                        order_id=order.id,
+                        supersedes_entry_id=hold.id,
+                        created_by="system",
+                    )
+                )
+
+            # Mark the Payout as paid if it exists and is still requested/processing
+            if order.payout_id:
+                payout_res = await db.execute(
+                    select(Payout).where(Payout.id == order.payout_id)
+                )
+                payout = payout_res.scalar_one_or_none()
+                if payout and payout.status in ("requested", "processing"):
+                    payout.status = "paid"
+                    payout.paid_at = datetime.utcnow()
+                    db.add(payout)
+
+            # Update fulfillment status to delivered
+            if fulfillment.status not in (FulfillmentStatus.DELIVERED.value, FulfillmentStatus.DELIVERED_DIGITAL.value):
+                fulfillment.status = FulfillmentStatus.DELIVERED.value
+                fulfillment.delivered_at = datetime.utcnow()
+
+            await db.commit()
 
 
 # Singleton instance

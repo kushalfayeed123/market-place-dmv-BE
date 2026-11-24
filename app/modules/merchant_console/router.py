@@ -869,42 +869,56 @@ async def ship_order(
             )
         )
 
-        # 2) Release the merchant's held payout funds on delivery -- the
-        #    group-g2 `payout_release` ledger entry (design: "on delivery
-        #    confirmation a new balanced pair is posted"). When a `payout_hold`
-        #    exists (pay-on-delivery / proof-of-payment flow) the release supersedes
-        #    it; otherwise it posts a standalone credit, mirroring `approve_order`.
-        supersedes = None
-        hold = (
+        # 2) Release the merchant's held payout funds on delivery -- one
+        #    payout_release per unreleased payout_hold entry, each superseding
+        #    its hold so the held-balance query stops counting it.
+        hold_rows = (
             await db.execute(
                 select(LedgerEntry)
                 .where(
                     LedgerEntry.order_id == order.id,
                     LedgerEntry.merchant_id == merchant_id,
                     LedgerEntry.entry_type == LedgerEntryType.PAYOUT_HOLD.value,
+                    LedgerEntry.id.not_in(
+                        select(LedgerEntry.supersedes_entry_id).where(
+                            LedgerEntry.supersedes_entry_id.isnot(None)
+                        )
+                    ),
                 )
-                .order_by(LedgerEntry.created_at.desc())
-                .limit(1)
+                .order_by(LedgerEntry.created_at)
             )
-        ).scalar_one_or_none()
-        if hold:
-            supersedes = hold.id
-
-        db.add(
-            LedgerEntry(
-                entry_group_id=uuid4(),
-                account_type="merchant_wallet",
-                merchant_id=merchant_id,
-                direction=LedgerDirection.CREDIT.value,
-                entry_type=LedgerEntryType.PAYOUT_RELEASE.value,
-                amount=abs(net_total),
-                currency=currency,
-                order_id=order.id,
-                supersedes_entry_id=supersedes,
-                created_by=str(current_user.id),
+        ).scalars().all()
+        if hold_rows:
+            for hold in hold_rows:
+                db.add(
+                    LedgerEntry(
+                        entry_group_id=uuid4(),
+                        account_type='merchant_wallet',
+                        merchant_id=merchant_id,
+                        direction=LedgerDirection.CREDIT.value,
+                        entry_type=LedgerEntryType.PAYOUT_RELEASE.value,
+                        amount=hold.amount,
+                        currency=hold.currency,
+                        order_id=order.id,
+                        supersedes_entry_id=hold.id,
+                        created_by=str(current_user.id),
+                    )
+                )
+        else:
+            # Legacy orders without hold entries: standalone credit, mirroring approve_order.
+            db.add(
+                LedgerEntry(
+                    entry_group_id=uuid4(),
+                    account_type='merchant_wallet',
+                    merchant_id=merchant_id,
+                    direction=LedgerDirection.CREDIT.value,
+                    entry_type=LedgerEntryType.PAYOUT_RELEASE.value,
+                    amount=abs(net_total),
+                    currency=currency,
+                    order_id=order.id,
+                    created_by=str(current_user.id),
+                )
             )
-        )
-
         # 3) Finalize the sale in inventory. Checkout already hard-reserved
         #    tracked stock (app.modules.orders.service: `quantity_available`
         #    decremented, `quantity_reserved` incremented at order creation).

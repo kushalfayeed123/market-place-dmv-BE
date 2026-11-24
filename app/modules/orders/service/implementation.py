@@ -101,6 +101,7 @@ class OrderServiceImpl(OrderService):
         order_items_data = []
         requires_delivery = False
         cart_types: set[str] = set()
+        cart_currencies: set[str] = set()
 
         for cart_item in checkout_data.items:
             # Get product variant
@@ -159,6 +160,7 @@ class OrderServiceImpl(OrderService):
             # Calculate price
             unit_price = variant.price_override_amount or product.base_price_amount
             currency = variant.price_override_currency or product.base_price_currency
+            cart_currencies.add(currency.upper())
             line_total = unit_price * cart_item.quantity
             order_total += line_total
 
@@ -171,6 +173,17 @@ class OrderServiceImpl(OrderService):
                 "currency": currency,
                 "line_total": line_total,
             })
+
+        # v1 multi-vendor rule (design doc §5.4): one checkout transaction may
+        # span multiple merchants ONLY if they share a currency — a cart with
+        # mixed-currency items must check out as separate orders.
+        if len(cart_currencies) > 1:
+            raise ValueError(
+                "Your cart contains items in different currencies "
+                f"({', '.join(sorted(cart_currencies))}). "
+                "Please check out each currency separately."
+            )
+        currency = next(iter(cart_currencies)) if cart_currencies else "NGN"
 
         fulfillment_option = checkout_data.fulfillment_option
         if fulfillment_option is None:
@@ -550,40 +563,11 @@ class OrderServiceImpl(OrderService):
         )
         self._db.add(payment_transaction)
 
-        # Create ledger entries: sale (debit) + payout_hold (credit) per merchant
-        group_id = uuid.uuid4()
-        items_result = await self._db.execute(
-            select(OrderItem).where(OrderItem.order_id == order.id)
-        )
-        order_items = items_result.scalars().all()
+        # Create ledger entries: sale + commission + payout_hold per merchant item
+        # (shared with the online-payment webhook path so both settle identically).
+        from app.modules.payments.service.implementation import post_order_ledger_entries
 
-        for item in order_items:
-            # Sale entry (debit -- platform records the sale)
-            self._db.add(LedgerEntry(
-                entry_group_id=group_id,
-                account_type="platform_revenue",
-                merchant_id=item.merchant_id,
-                direction=LedgerDirection.DEBIT.value,
-                entry_type=LedgerEntryType.SALE.value,
-                amount=abs(item.line_total),
-                currency=item.currency,
-                order_id=order.id,
-                payment_transaction_id=payment_transaction.id,
-                created_by=str(buyer_id),
-            ))
-            # Payout hold entry (credit -- funds held for merchant until approval)
-            self._db.add(LedgerEntry(
-                entry_group_id=group_id,
-                account_type="merchant_wallet",
-                merchant_id=item.merchant_id,
-                direction=LedgerDirection.CREDIT.value,
-                entry_type=LedgerEntryType.PAYOUT_HOLD.value,
-                amount=abs(item.line_total),
-                currency=item.currency,
-                order_id=order.id,
-                payment_transaction_id=payment_transaction.id,
-                created_by=str(buyer_id),
-            ))
+        await post_order_ledger_entries(self._db, order, payment_transaction, str(buyer_id))
 
         # Update order status to awaiting_approval
         order.status = OrderStatus.AWAITING_APPROVAL.value

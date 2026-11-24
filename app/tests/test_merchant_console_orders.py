@@ -833,7 +833,8 @@ async def test_ship_records_fulfillment_and_payout_release(
     )
     assert len(rows) == 1
     assert rows[0].account_type == "merchant_wallet"
-    assert rows[0].amount == 10000  # single 100.00 NGN minor-unit line item
+    # Release amount = payout_hold amount = net (gross 10000 - 10% commission 1000)
+    assert rows[0].amount == 9000
 
 
 @pytest.mark.asyncio
