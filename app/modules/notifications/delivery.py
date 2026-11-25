@@ -51,7 +51,12 @@ class EmailNotificationSender:
                 json=payload,
                 headers={"Authorization": f"Bearer {settings.RESEND_API_KEY}"},
             )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            # Include Resend's error body (e.g. "domain is not verified")
+            # so the failure reason shows up in logs and the 502 detail.
+            raise RuntimeError(
+                f"Resend API returned {response.status_code}: {response.text}"
+            )
         reference = response.json().get("id")
         if not reference:
             raise RuntimeError("Resend response did not contain an email ID")

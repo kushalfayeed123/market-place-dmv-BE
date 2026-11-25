@@ -26,6 +26,14 @@ class CheckoutRequest(BaseModel):
         None,
         description="Delivery address as a JSON object. Required when fulfillment_option is 'delivery'",
     )
+    # Buyer phone number — collected at checkout so the merchant can reach the
+    # buyer for delivery coordination. Required when fulfillment is delivery.
+    buyer_phone: str | None = Field(
+        None,
+        min_length=7,
+        max_length=32,
+        description="Buyer contact phone number (E.164 preferred). Required for delivery orders.",
+    )
     # Fulfillment option: "delivery" or "pickup"
     fulfillment_option: str | None = Field(
         None,
@@ -44,6 +52,7 @@ class CheckoutResponse(BaseModel):
     created_at: datetime
     items: list[dict]  # Order item details
     delivery_address: dict | None = None
+    buyer_phone: str | None = None
     fulfillment_option: str | None = None
 
 
@@ -58,6 +67,7 @@ class OrderResponse(BaseModel):
     item_count: int = 0
     merchant_id: str | None = None
     merchant_name: str | None = None
+    buyer_phone: str | None = None
     payment_status: str | None = None
     fulfillment_status: str | None = None
     fulfilled_at: Optional[datetime] = None

@@ -269,9 +269,10 @@ async def list_merchant_orders(
 
     buyer_ids = [r.Order.buyer_id for r in rows]
     user_map: dict[str, str] = {}
+    phone_map: dict[str, str | None] = {}
     if buyer_ids:
         users = await db.execute(
-            select(User.id, User.first_name, User.last_name, User.email).where(
+            select(User.id, User.first_name, User.last_name, User.email, User.phone).where(
                 User.id.in_(buyer_ids)
             )
         )
@@ -280,12 +281,15 @@ async def list_merchant_orders(
             if not name:
                 name = (u.email or "").split("@")[0]
             user_map[str(u.id)] = name
+            phone_map[str(u.id)] = u.phone
 
     return [
         MerchantOrderListItem(
             id=str(r.Order.id),
             number=r.Order.order_number,
             customer_name=user_map.get(str(r.Order.buyer_id), ""),
+            # Prefer the phone captured at checkout; fall back to profile phone.
+            customer_phone=r.Order.buyer_phone or phone_map.get(str(r.Order.buyer_id)),
             created_at=r.Order.created_at,
             total=r.Order.total_amount,
             currency=r.Order.currency,
@@ -386,7 +390,9 @@ async def get_merchant_order_detail(
             )
         )
 
-    # Buyer details.
+    # Buyer details. Prefer the phone captured at checkout (order.buyer_phone)
+        # so the merchant can reach the buyer for delivery even if their profile
+        # phone changed; fall back to the profile phone.
     buyer_obj = await db.get(User, order.buyer_id)
     if buyer_obj:
         buyer_name = f"{buyer_obj.first_name or ''} {buyer_obj.last_name or ''}".strip()
@@ -396,11 +402,13 @@ async def get_merchant_order_detail(
             id=str(buyer_obj.id),
             name=buyer_name,
             email=buyer_obj.email or "",
-            phone=buyer_obj.phone,
+                phone=order.buyer_phone or buyer_obj.phone,
             avatar_url=buyer_obj.avatar_url,
         )
     else:
-        buyer = MerchantOrderBuyer(id=str(order.buyer_id), name="—", email="")
+            buyer = MerchantOrderBuyer(
+                id=str(order.buyer_id), name="—", email="", phone=order.buyer_phone
+            )
 
     # Payment record (mode of payment). Newest transaction wins for display.
     pt_rows = (

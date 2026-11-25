@@ -229,6 +229,15 @@ class PaymentServiceImpl(PaymentService):
             raw_payload=raw_payload,
         )
 
+        # Record the customer email on the transaction for traceability.
+        if raw_payload:
+            payload_obj = json.loads(raw_payload)
+        else:
+            payload_obj = {}
+        payload_obj["customer_email"] = buyer_email
+        payload_obj["order_number"] = order.order_number
+        payment_transaction.raw_payload = json.dumps(payload_obj)
+
         self._db.add(payment_transaction)
 
         # Order status remains "pending" until webhook confirms payment

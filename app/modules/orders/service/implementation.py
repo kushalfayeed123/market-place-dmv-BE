@@ -20,6 +20,7 @@ from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
 from app.models.product import Product, product_product_types
 from app.models.product_variant import ProductVariant
+from app.models.user import User
 
 
 def _variant_label(variant: ProductVariant | None) -> str | None:
@@ -199,6 +200,20 @@ class OrderServiceImpl(OrderService):
                 "delivery_address is required for carts containing physical products"
             )
 
+        # Buyer phone: required whenever the order involves physical delivery
+        # (the merchant needs it to coordinate drop-off). Falls back to the
+        # buyer's profile phone when not supplied at checkout.
+        buyer_phone = (checkout_data.buyer_phone or "").strip() or None
+        if buyer_phone is None and requires_delivery and fulfillment_option != "pickup":
+            buyer_result = await self._db.execute(
+                select(User.phone).where(User.id == to_uuid(buyer_id))
+            )
+            buyer_phone = buyer_result.scalar_one_or_none()
+        if requires_delivery and fulfillment_option != "pickup" and not buyer_phone:
+            raise ValueError(
+                "buyer_phone is required for delivery orders — add a contact number so the merchant can reach you"
+            )
+
         # Create order
         new_order = Order(
             buyer_id=to_uuid(buyer_id),
@@ -208,6 +223,7 @@ class OrderServiceImpl(OrderService):
             total_amount=order_total,
             idempotency_key=idempotency_key,
             delivery_address=checkout_data.delivery_address,
+            buyer_phone=buyer_phone,
         )
 
         self._db.add(new_order)
@@ -296,6 +312,7 @@ class OrderServiceImpl(OrderService):
             item_count=sum(item_data["quantity"] for item_data in order_items_data),
             created_at=new_order.created_at,
             delivery_address=checkout_data.delivery_address,
+            buyer_phone=new_order.buyer_phone,
             fulfillment_option=fulfillment_option,
             items=[
                 {
@@ -403,6 +420,7 @@ class OrderServiceImpl(OrderService):
             item_count=sum(item.quantity for item in order_items),
             merchant_id=merchant_id_str,
             merchant_name=merchant_name,
+            buyer_phone=order.buyer_phone,
             payment_status="paid" if order.status == OrderStatus.PAID.value else None,
             fulfillment_status=fulfillment_status,
             fulfilled_at=order.fulfilled_at,
@@ -514,6 +532,7 @@ class OrderServiceImpl(OrderService):
                     item_count=sum(item.quantity for item in order_items),
                     merchant_id=merchant_id_str,
                     merchant_name=merchant_name,
+                    buyer_phone=order.buyer_phone,
                     created_at=order.created_at,
                     updated_at=order.updated_at,
                     items=[

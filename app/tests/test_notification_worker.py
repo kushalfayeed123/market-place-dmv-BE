@@ -125,8 +125,8 @@ async def test_resend_email_sender_posts_content_and_returns_provider_id(monkeyp
     captured = {}
 
     class FakeResponse:
-        def raise_for_status(self):
-            pass
+        status_code = 200
+        text = '{"id": "resend-message-id"}'
 
         def json(self):
             return {"id": "resend-message-id"}
@@ -163,6 +163,36 @@ async def test_resend_email_sender_posts_content_and_returns_provider_id(monkeyp
         "text": "Your order has been confirmed.",
         "html": "<p>Order confirmed</p>",
     }
+
+
+@pytest.mark.asyncio
+async def test_resend_email_sender_raises_resend_error_body_on_failure(monkeypatch):
+    class ErrorResponse:
+        status_code = 403
+        text = '{"message": "The gmail.com domain is not verified", "name": "validation_error"}'
+
+        def json(self):
+            return {"message": "The gmail.com domain is not verified"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, json, headers):
+            return ErrorResponse()
+
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "test-api-key")
+    monkeypatch.setattr(settings, "RESEND_FROM_EMAIL", "sender@gmail.com")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="403.*domain is not verified"):
+        await EmailNotificationSender().send(make_notification(), "buyer@example.com")
 
 
 @pytest.mark.asyncio

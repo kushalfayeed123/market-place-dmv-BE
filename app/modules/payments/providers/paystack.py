@@ -72,12 +72,16 @@ class PaystackProvider(PaymentProvider):
         ``split_code`` attaches a pre-created Transaction Split so the single
         buyer payment fans out to merchant subaccounts at settlement.
         """
+        # Paystack's initialize endpoint REQUIRES a real customer email —
+        # never fall back to a placeholder address on the live path.
+        if not buyer_email:
+            raise ValueError("buyer_email is required to initialize a Paystack transaction")
         if not self._configured:
-            return self._stub_initialize(order_id, amount, currency, metadata)
+            return self._stub_initialize(order_id, amount, currency, metadata, buyer_email=buyer_email)
 
         # Build the request body for Paystack's initialize endpoint.
         body: dict = {
-            "email": buyer_email or "buyer@example.com",
+            "email": buyer_email,
             "amount": amount,
             "currency": currency,
             "reference": f"ord_{order_id}_{uuid.uuid4().hex[:12]}",
@@ -101,8 +105,11 @@ class PaystackProvider(PaymentProvider):
                 data = resp.json()
 
             if resp.status_code != 200 or not data.get("status", True):
-                # Paystack returns status=False on error; fall back to stub
-                return self._stub_initialize(order_id, amount, currency, metadata)
+                # Paystack returns status=False on error; surface the provider
+                # message instead of silently stubbing with a fake email.
+                raise RuntimeError(
+                    f"Paystack initialize failed: {data.get('message', 'unknown error')}"
+                )
 
             data = data.get("data", {})
             return PaymentInitResult(
@@ -110,10 +117,12 @@ class PaystackProvider(PaymentProvider):
                 payment_url=data.get("authorization_url"),
                 status="initialized",
             )
-        except Exception:
-            # On any network / API error, fall back to stub so the flow
-            # never hard-blocks in degraded environments.
-            return self._stub_initialize(order_id, amount, currency, metadata)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            # On any network / API error, surface it — do not mask provider
+            # failures with a stub that hides the real buyer email.
+            raise RuntimeError(f"Paystack initialize request failed: {exc}") from exc
 
     async def verify_transaction(self, provider_reference: str) -> bool:
         """Verify a Paystack transaction by reference."""
@@ -470,6 +479,7 @@ class PaystackProvider(PaymentProvider):
         amount: int,
         currency: str,
         metadata: dict | None,
+        buyer_email: str | None = None,
     ) -> PaymentInitResult:
         """Generate a deterministic stub payment when Paystack is not configured.
 
@@ -477,8 +487,14 @@ class PaystackProvider(PaymentProvider):
         simulates a successful Paystack redirect + webhook round-trip, then
         bounces the buyer back to the storefront.  This lets the full
         checkout → pay → confirm flow work end-to-end without real API keys.
+        The real buyer email is recorded in metadata so the stub flow still
+        exercises the customer-address path.
         """
         reference = f"paystack_ord_{order_id}_{uuid.uuid4().hex[:12]}"
+        if metadata is None:
+            metadata = {}
+        if buyer_email:
+            metadata = {**metadata, "customer_email": buyer_email}
         # Stub redirect: backend simulates the Paystack webhook, then redirects
         # the buyer back to the frontend order page.
         payment_url = f"{settings.FRONTEND_URL}/pay/stub-callback?ref={reference}"

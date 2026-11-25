@@ -90,19 +90,51 @@ setup_security(app)
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize Redis connection and validate S3 bucket on startup."""
+    """Initialize Redis, validate S3 bucket, and start the notification worker."""
+    import asyncio
+
     await init_redis(settings.REDIS_URL)
     # Validate S3 bucket is reachable (logs warning if not, but doesn't crash)
     try:
-        import asyncio as _asyncio
-
         from app.core.storage import key_exists
 
-        await _asyncio.to_thread(key_exists, bucket=settings.S3_BUCKET, key=".health-check")
+        await asyncio.to_thread(key_exists, bucket=settings.S3_BUCKET, key=".health-check")
     except Exception as exc:  # noqa: BLE001
-        from app.core.logging import setup_logging
         logger = logging.getLogger(__name__)
         logger.warning("S3 bucket check failed on startup: %s", exc)
+
+    # Start the notification worker in-process so queued (pending)
+    # notifications are delivered without a separately deployed process.
+    # The claim logic (pending -> sending) is safe across multiple uvicorn
+    # workers, so every process running this startup may run a worker.
+    from app.workers.notification_worker import start_notification_worker
+
+    if not (settings.RESEND_API_KEY and settings.RESEND_FROM_EMAIL):
+        logging.getLogger(__name__).warning(
+            "RESEND_API_KEY/RESEND_FROM_EMAIL not set; "
+            "email notifications will fail until Resend is configured"
+        )
+    app.state.notification_worker_task = asyncio.create_task(
+        start_notification_worker(), name="notification-worker"
+    )
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop the in-process notification worker background task."""
+    import asyncio
+
+    from app.workers.notification_worker import stop_notification_worker
+
+    stop_notification_worker()
+    task = getattr(app.state, "notification_worker_task", None)
+    if task is not None:
+        try:
+            # stop() lets the current batch finish; bound the wait so
+            # shutdown never hangs on a stuck cycle.
+            await asyncio.wait_for(task, timeout=15)
+        except (TimeoutError, asyncio.CancelledError):
+            task.cancel()
 
 
 @app.get("/")

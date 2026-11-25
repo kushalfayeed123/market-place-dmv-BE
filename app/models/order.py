@@ -36,6 +36,9 @@ class Order(BaseModel):
     total_amount = Column(BIGINT, nullable=False)  # Minor units
     # Optional delivery/shipping address captured at checkout (JSON blob).
     delivery_address = Column(JSON, nullable=True)
+    # Buyer contact phone captured at checkout so the merchant can coordinate
+    # delivery. Stored on the order so it survives even if the user profile changes.
+    buyer_phone = Column(String(32), nullable=True)
     # VARCHAR(255): unique column, MySQL cannot index TEXT without a prefix length
     idempotency_key = Column(String(255), nullable=True, unique=True)
     # Timestamp when the order reached a fully fulfilled state.

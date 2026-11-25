@@ -29,6 +29,7 @@ class MerchantOrderListItem(BaseModel):
     id: str
     number: str
     customer_name: str
+    customer_phone: Optional[str] = None  # checkout phone (or profile phone fallback)
     created_at: datetime
     total: int               # minor units
     currency: str

@@ -13,11 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_active_user
 from app.db.session import get_db
+from app.modules.merchants.service.base import MerchantService
+from app.modules.merchants.service.dependency import get_merchant_service
 from app.modules.notifications.delivery import EmailNotificationSender
 from app.modules.notifications.service.base import NotificationService
 from app.modules.notifications.service.dependency import get_notification_service
-from app.modules.merchants.service.base import MerchantService
-from app.modules.merchants.service.dependency import get_merchant_service
 from app.schemas.notification import NotificationCreate, NotificationResponse
 
 router = APIRouter()
@@ -87,7 +87,7 @@ async def send_test_email(
         type="test_email",
         channel="email",
         user_id=str(current_user.id),
-        context={"recipient_email": user.email},
+        context={"recipient_email": "segunajanaku617@gmail.com"},
     )
 
     # Send immediately for instant feedback.
@@ -97,7 +97,7 @@ async def send_test_email(
             detail="Resend is not configured (RESEND_API_KEY / RESEND_FROM_EMAIL missing)",
         )
     try:
-        receipt = await EmailNotificationSender().send(n, user.email)
+        receipt = await EmailNotificationSender().send(n, "segunajanaku617@gmail.com")
         await service.mark_sent(n.id, receipt.provider, receipt.reference)
     except Exception as e:
         await service.mark_failed(n.id)
