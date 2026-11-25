@@ -31,6 +31,9 @@ class MerchantPayoutAccount(BaseModel):
     provider = Column(String(50), nullable=False)  # 'paystack', 'flutterwave', 'stripe', etc.
     currency = Column(CHAR(3), nullable=False)
     external_ref = Column(Text, nullable=False)  # e.g. Paystack subaccount_code
+    # Provider-side transfer recipient code used to initiate payouts to this
+    # account (never the full account number).
+    recipient_code = Column(Text, nullable=True)
     account_last4 = Column(Text)
     bank_name = Column(Text)
     # Additional bank-account metadata

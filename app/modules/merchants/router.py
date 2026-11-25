@@ -80,6 +80,22 @@ async def onboard_merchant(
             detail=str(e),
         )
 
+    # Welcome email — every newly registered merchant gets one.
+    try:
+        from app.modules.notifications.service.dependency import get_notification_service
+        from app.db.session import get_db as _get_db
+
+        db = next(_get_db())
+        notification_service = get_notification_service(db)
+        await notification_service.notify(
+            type="welcome_email",
+            channel="email",
+            merchant_id=merchant.id,
+            context={"business_name": merchant.business_name},
+        )
+    except Exception:
+        pass  # notifications must never block onboarding
+
     return merchant
 
 

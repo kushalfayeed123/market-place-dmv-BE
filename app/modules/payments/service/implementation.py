@@ -17,6 +17,7 @@ from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
 from app.models.product import Product
+from app.models.user import User
 from app.models.webhook_event import WebhookEvent
 from app.modules.payments.providers.base import SplitLeg
 from app.modules.notifications.service.base import NotificationService
@@ -193,6 +194,15 @@ class PaymentServiceImpl(PaymentService):
         # orders or when the merchant has no provider subaccount.
         split_code = await _create_order_split(self._db, order, provider)
 
+        # Resolve the buyer's real email — Paystack requires a customer email
+        # on transaction initialize; it must never be a placeholder.
+        buyer = (
+            await self._db.execute(select(User).where(User.id == order.buyer_id))
+        ).scalar_one_or_none()
+        if buyer is None or not buyer.email:
+            raise ValueError("Buyer account has no email address — cannot initialize payment")
+        buyer_email = buyer.email
+
         # Initialise the payment with the provider.
         # When Paystack credentials are not configured (dev/test), the provider
         # falls back to a local stub that returns a reference + mock URL.
@@ -200,7 +210,7 @@ class PaymentServiceImpl(PaymentService):
             order_id=str(order.id),
             amount=order.total_amount,
             currency=order.currency,
-            buyer_email=None,
+            buyer_email=buyer_email,
             metadata={"order_number": order.order_number},
             split_code=split_code,
         )

@@ -59,6 +59,26 @@ class SplitResult:
     provider: str
 
 
+@dataclass(frozen=True)
+class BankAccountResolution:
+    """Result of resolving/validating a bank account with the provider."""
+
+    account_number: str
+    account_name: str  # name as registered at the bank
+    bank_code: str
+    bank_name: str | None = None
+
+
+@dataclass(frozen=True)
+class BankInfo:
+    """A bank the provider can settle to."""
+
+    code: str
+    name: str
+    country: str = "NG"
+    currency: str = "NGN"
+
+
 # ── Enum-like constants (kept as plain strings for DB / JSON compat) ─────────
 
 class PaymentStatus:
@@ -124,12 +144,50 @@ class PaymentProvider(abc.ABC):
         bank_code: str | None = None,
         account_number: str | None = None,
         percentage_charge: float = 0.0,
+        settlement_schedule: str = "auto",
     ) -> str | None:
         """Register a merchant subaccount; returns the provider subaccount code.
 
         Optional — providers without subaccounts return ``None`` and the
         platform settles to merchants from its own ledger instead.
         """
+        return None
+
+    async def resolve_bank_account(
+        self, bank_code: str, account_number: str, currency: str = "NGN"
+    ) -> BankAccountResolution | None:
+        """Validate a bank account; returns the registered account name.
+
+        Optional — providers without account resolution return ``None``.
+        """
+        return None
+
+    async def list_banks(self, country: str = "NG", currency: str = "NGN") -> list[BankInfo]:
+        """List banks the provider can settle to in a country/currency."""
+        return []
+
+    async def create_transfer_recipient(
+        self,
+        account_number: str,
+        bank_code: str,
+        account_name: str,
+        currency: str = "NGN",
+    ) -> str | None:
+        """Create a transfer recipient; returns the provider recipient code.
+
+        Payouts are initiated to this code. Optional.
+        """
+        return None
+
+    async def initiate_transfer(
+        self,
+        recipient_code: str,
+        amount: int,
+        currency: str,
+        reference: str,
+        reason: str = "",
+    ) -> str | None:
+        """Send ``amount`` (minor units) to a recipient; returns transfer code."""
         return None
 
     async def create_split(

@@ -63,6 +63,33 @@ def get_provider(provider_name: str) -> PaymentProvider | None:
     return cls()
 
 
+#: Default provider per currency — platform-level choice, never merchant-chosen.
+_CURRENCY_PROVIDER: dict[str, str] = {
+    "NGN": "paystack",
+    "GHS": "paystack",
+    "KES": "paystack",
+    "ZAR": "paystack",
+    "USD": "paystack",
+}
+
+
+def get_provider_for_currency(currency: str) -> PaymentProvider | None:
+    """Return the implemented provider that handles ``currency``.
+
+    Extensible: register more providers and map their currencies here; when
+    our own provider is integrated it just gets its own entry.
+    """
+    key = _CURRENCY_PROVIDER.get((currency or "").upper(), "paystack")
+    provider = get_provider(key)
+    if provider is not None and is_provider_implemented(key):
+        return provider
+    # Fall back to the first implemented provider.
+    for info in _PROVIDER_INFO.values():
+        if info.implemented:
+            return get_provider(info.key)
+    return None
+
+
 def get_available_providers(currency: str | None = None) -> list[ProviderInfo]:
     """Return all registered providers, optionally filtered by currency.
 

@@ -1211,6 +1211,73 @@ async def create_payout_request(
         bank_name=account.bank_name,
     )
     db.add(new_payout)
+
+    # ── Execute the payout ─────────────────────────────────────────────
+    # The merchant's available wallet balance must cover the request. Funds
+    # are sent from their provider subaccount to the registered bank account
+    # via the integrated provider's transfer API; the ledger is debited with
+    # a payout_paid entry so the portal balance stays in sync with the
+    # subaccount.
+    from app.modules.ledger.service.implementation import LedgerServiceImpl
+    from app.modules.payments.providers.registry import get_provider_for_currency
+
+    ledger = LedgerServiceImpl(db)
+    balance = await ledger.get_balance(str(merchant.id), user_id=str(current_user.id), user_role=current_user.role.value)
+    if payout_data.amount > balance.available_balance:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Insufficient available balance. Available: {balance.available_balance} "
+                f"{balance.currency}, requested: {payout_data.amount}."
+            ),
+        )
+
+    provider = get_provider_for_currency(account.currency)
+    if provider is None or not account.recipient_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payout provider not available for this account.",
+        )
+
+    new_payout.status = "processing"
+    new_payout.processed_at = datetime.now(UTC)
+    db.add(new_payout)
+    await db.flush()
+
+    try:
+        transfer_code = await provider.initiate_transfer(
+            recipient_code=account.recipient_code,
+            amount=payout_data.amount,
+            currency=account.currency,
+            reference=reference,
+            reason=f"Payout for merchant {merchant.business_name}",
+        )
+    except Exception as e:
+        new_payout.status = "failed"
+        db.add(new_payout)
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Payout transfer failed: {e}",
+        )
+
+    # Provider accepted — record the payout in the ledger and mark paid.
+    db.add(
+        LedgerEntry(
+            entry_group_id=uuid4(),
+            account_type="merchant_wallet",
+            merchant_id=merchant.id,
+            direction=LedgerDirection.DEBIT.value,
+            entry_type=LedgerEntryType.PAYOUT_PAID.value,
+            amount=payout_data.amount,
+            currency=account.currency,
+            created_by=str(current_user.id),
+            ledger_metadata=json.dumps({"payout_id": str(new_payout.id), "transfer_code": transfer_code, "reference": reference}),
+        )
+    )
+    new_payout.status = "paid"
+    new_payout.paid_at = datetime.now(UTC)
+    db.add(new_payout)
     await db.commit()
     await db.refresh(new_payout)
 
@@ -1229,6 +1296,54 @@ async def create_payout_request(
         created_at=new_payout.created_at,
         updated_at=new_payout.updated_at,
     )
+
+
+# ── Admin: welcome-email backfill ────────────────────────────────────────
+
+
+@router.post("/admin/merchants/welcome-emails/backfill")
+async def backfill_welcome_emails(
+    current_user: User = get_current_active_user_depends,
+    db: AsyncSession = get_db_depends,
+):
+    """Send the welcome email to every merchant that never received one.
+
+    Admin-only. Idempotent: merchants that already have a ``welcome_email``
+    notification are skipped, so existing merchants registered before the
+    welcome-email feature still get one exactly once.
+    """
+    if current_user.role != UserRole.PLATFORM_ADMIN:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    from app.models.notification import Notification
+    from app.modules.notifications.service.implementation import NotificationServiceImpl
+
+    merchants = (await db.execute(select(Merchant))).scalars().all()
+    welcomed = {
+        row[0]
+        for row in (await db.execute(
+            select(Notification.merchant_id).where(Notification.type == "welcome_email")
+        )).all()
+        if row[0] is not None
+    }
+
+    service = NotificationServiceImpl(db)
+    sent = 0
+    for m in merchants:
+        if m.id in welcomed:
+            continue
+        try:
+            await service.notify(
+                type="welcome_email",
+                channel="email",
+                merchant_id=str(m.id),
+                context={"business_name": m.business_name},
+            )
+            sent += 1
+        except Exception:
+            continue
+    await db.commit()
+    return {"ok": True, "welcome_emails_queued": sent, "merchants_total": len(merchants)}
 
 
 # ── Admin KYC review ────────────────────────────────────────────────────

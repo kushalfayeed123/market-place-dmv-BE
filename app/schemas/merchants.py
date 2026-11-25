@@ -87,16 +87,23 @@ class MerchantResponse(BaseModel):
 
 
 class MerchantPayoutAccountCreate(BaseModel):
-    provider: str = Field(..., min_length=1, max_length=50)
-    currency: str = Field(..., min_length=3, max_length=3)
-    external_ref: str = Field(..., min_length=1)
-    account_last4: str | None = None
+    """Bank details only — the platform picks the payout provider per currency.
+
+    The account number is validated with the provider and used to create a
+    subaccount + transfer recipient; only the last 4 digits are stored.
+    """
+
+    currency: str = Field("NGN", min_length=3, max_length=3)
+    country: str = Field("NG", min_length=2, max_length=2)  # ISO 3166-1 alpha-2
+    bank_code: str = Field(..., min_length=1, description="Provider bank code")
     bank_name: str | None = None
+    account_number: str = Field(..., min_length=5, description="Full account number — validated, never stored in plaintext")
+    # The account holder name is NOT entered by the merchant — it is returned
+    # by the provider's account verification and stored from that. This field
+    # is accepted for backwards compatibility but ignored.
     account_holder_name: str | None = None
-    bank_code: str | None = None
     routing_number: str | None = None
-    account_type: str | None = None
-    country: str | None = None  # ISO 3166-1 alpha-2
+    account_type: str | None = None  # 'checking' | 'savings'
 
 
 class MerchantPayoutAccountUpdate(BaseModel):
@@ -118,6 +125,7 @@ class MerchantPayoutAccountResponse(BaseModel):
     provider: str
     currency: str
     external_ref: str
+    recipient_code: str | None = None
     account_last4: str | None = None
     bank_name: str | None = None
     account_holder_name: str | None = None

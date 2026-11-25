@@ -239,6 +239,62 @@ async def list_payment_methods(
     ]
 
 
+@router.get("/banks", response_model=list[dict])
+async def list_banks(
+    country: str = Query("NG"),
+    currency: str = Query("NGN"),
+    current_user: dict = get_current_active_user_depends,
+):
+    """List banks the integrated payment provider can settle payouts to.
+
+    Used by the merchant payout-account form so the merchant picks a real
+    bank (and its code) instead of typing one. Authenticated merchants only.
+    """
+    from app.modules.payments.providers.registry import get_provider_for_currency
+
+    provider = get_provider_for_currency(currency)
+    if provider is None:
+        return []
+    banks = await provider.list_banks(country=country.upper(), currency=currency.upper())
+    return [
+        {"code": b.code, "name": b.name, "country": b.country, "currency": b.currency}
+        for b in banks
+    ]
+
+
+@router.get("/resolve-account")
+async def resolve_bank_account(
+    account_number: str = Query(..., min_length=5),
+    bank_code: str = Query(..., min_length=1),
+    currency: str = Query("NGN"),
+    current_user: dict = get_current_active_user_depends,
+):
+    """Verify a bank account and return the registered account name.
+
+    The name is returned by the provider based on the account number — the
+    merchant never types it. Used by the payout form to auto-fill/confirm
+    the account holder name.
+    """
+    from app.modules.payments.providers.registry import get_provider_for_currency
+
+    provider = get_provider_for_currency(currency)
+    if provider is None:
+        raise HTTPException(status_code=400, detail=f"No provider for currency {currency}")
+    try:
+        resolution = await provider.resolve_bank_account(
+            bank_code, account_number, currency=currency.upper()
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if resolution is None:
+        raise HTTPException(status_code=400, detail="Bank account could not be verified")
+    return {
+        "account_number": resolution.account_number,
+        "account_name": resolution.account_name,
+        "bank_code": resolution.bank_code,
+    }
+
+
 @router.post("/{payment_id}/refund", response_model=RefundResponse)
 async def process_refund(
     request: Request,

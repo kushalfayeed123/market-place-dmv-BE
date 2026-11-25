@@ -16,6 +16,26 @@ class NotificationService(ABC):
         ...
 
     @abstractmethod
+    async def notify(
+        self,
+        *,
+        type: str,
+        channel: str = "email",
+        user_id: Optional[str] = None,
+        merchant_id: Optional[str] = None,
+        context: Optional[dict] = None,
+        related_order_id: Optional[str] = None,
+        related_payment_id: Optional[str] = None,
+        related_product_id: Optional[str] = None,
+    ) -> NotificationResponse:
+        """Create a templated notification: render subject/body/html from ``type`` + ``context``.
+
+        Exactly one of ``user_id`` / ``merchant_id`` must be set so a
+        notification can never be delivered to the wrong party.
+        """
+        ...
+
+    @abstractmethod
     async def get_notification(self, notification_id: str) -> Optional[NotificationResponse]:
         """Fetch a single notification by id."""
         ...

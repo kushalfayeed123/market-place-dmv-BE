@@ -252,16 +252,69 @@ class MerchantServiceImpl(MerchantService):
     async def create_payout_account(
         self, merchant_id: str, data: MerchantPayoutAccountCreate
     ) -> MerchantPayoutAccountResponse:
-        """Create a payout account for a merchant."""
+        """Register a merchant's bank account as a payout account.
+
+        The platform picks the provider for the account currency (never the
+        merchant). The account number is validated with the provider, a
+        subaccount is created for the merchant, and a transfer recipient is
+        registered for payouts. Only the last 4 digits are persisted —
+        ``external_ref`` holds the provider subaccount code.
+        """
+        from app.modules.payments.providers.registry import get_provider_for_currency
+
+        merchant = (
+            await self._db.execute(
+                select(Merchant).where(Merchant.id == to_uuid(merchant_id))
+            )
+        ).scalar_one_or_none()
+        if merchant is None:
+            raise ValueError("Merchant not found")
+
+        currency = (data.currency or "NGN").upper()
+        provider = get_provider_for_currency(currency)
+        if provider is None:
+            raise ValueError(f"No payment provider available for currency {currency}")
+
+        # 1) Validate the bank account with the provider. The registered
+        #    account name comes BACK from the provider — the merchant never
+        #    enters it (any supplied name is ignored in favour of the
+        #    verified one).
+        account_number = (data.account_number or "").strip()
+        bank_code = (data.bank_code or "").strip()
+        resolution = await provider.resolve_bank_account(
+            bank_code, account_number, currency=currency
+        )
+        if resolution is None or not resolution.account_name:
+            raise ValueError("Bank account could not be validated")
+        account_name = resolution.account_name
+
+        # 2) Create a subaccount for the merchant (settles to this bank).
+        subaccount_code = await provider.create_subaccount(
+            business_name=merchant.business_name,
+            bank_code=bank_code,
+            account_number=account_number,
+        )
+        if not subaccount_code:
+            raise ValueError("Provider could not create a subaccount for this merchant")
+
+        # 3) Register a transfer recipient so payouts can be initiated to it.
+        recipient_code = await provider.create_transfer_recipient(
+            account_number=account_number,
+            bank_code=bank_code,
+            account_name=account_name,
+            currency=currency,
+        )
+
         account = MerchantPayoutAccount(
             merchant_id=to_uuid(merchant_id),
-            provider=data.provider,
-            currency=data.currency,
-            external_ref=data.external_ref,
-            account_last4=data.account_last4,
+            provider=provider.provider_key,
+            currency=currency,
+            external_ref=subaccount_code,
+            recipient_code=recipient_code,
+            account_last4=account_number[-4:],
             bank_name=data.bank_name,
-            account_holder_name=data.account_holder_name,
-            bank_code=data.bank_code,
+            account_holder_name=account_name,
+            bank_code=bank_code,
             routing_number=data.routing_number,
             account_type=data.account_type,
             country=data.country,
@@ -295,6 +348,7 @@ class MerchantServiceImpl(MerchantService):
             provider=account.provider,
             currency=account.currency,
             external_ref=account.external_ref,
+            recipient_code=account.recipient_code,
             account_last4=account.account_last4,
             bank_name=account.bank_name,
             account_holder_name=account.account_holder_name,

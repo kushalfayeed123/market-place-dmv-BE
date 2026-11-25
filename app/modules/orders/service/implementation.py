@@ -255,19 +255,30 @@ class OrderServiceImpl(OrderService):
                         related_order_id=str(new_order.id),
                     )
                 )
-                # Merchant: new order alert (one per merchant in the order)
+                # Merchant: new order alert (one per merchant in the order) —
+                # EMAIL so the merchant actually receives it, plus in-app copy.
                 merchant_ids = {str(d["merchant_id"]) for d in order_items_data}
                 for m_id in merchant_ids:
                     await self._notification_service.create_notification(
                         NotificationCreate(
                             merchant_id=m_id,
                             type=NotificationType.MERCHANT_NEW_ORDER.value,
-                            channel=NotificationChannel.PUSH.value,
+                            channel=NotificationChannel.EMAIL.value,
                             subject=f"New order {new_order.order_number}",
                             body=(
                                 f"You have a new order ({new_order.order_number}) "
                                 f"totaling {new_order.total_amount} {new_order.currency}."
                             ),
+                            related_order_id=str(new_order.id),
+                        )
+                    )
+                    await self._notification_service.create_notification(
+                        NotificationCreate(
+                            merchant_id=m_id,
+                            type=NotificationType.MERCHANT_NEW_ORDER.value,
+                            channel=NotificationChannel.PUSH.value,
+                            subject=f"New order {new_order.order_number}",
+                            body="You have a new order.",
                             related_order_id=str(new_order.id),
                         )
                     )

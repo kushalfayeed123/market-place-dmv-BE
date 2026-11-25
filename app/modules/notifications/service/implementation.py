@@ -4,6 +4,8 @@
 import json
 from datetime import datetime, timezone
 
+from typing import Optional
+
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +47,40 @@ class NotificationServiceImpl(NotificationService):
             sent_at=n.sent_at,
             created_at=n.created_at,
             updated_at=n.updated_at,
+        )
+
+    async def notify(
+        self,
+        *,
+        type: str,
+        channel: str = "email",
+        user_id: Optional[str] = None,
+        merchant_id: Optional[str] = None,
+        context: Optional[dict] = None,
+        related_order_id: Optional[str] = None,
+        related_payment_id: Optional[str] = None,
+        related_product_id: Optional[str] = None,
+    ) -> NotificationResponse:
+        """Create a templated notification — exactly one recipient is set."""
+        if bool(user_id) == bool(merchant_id):
+            raise ValueError("notify() requires exactly one of user_id or merchant_id")
+        from app.modules.notifications.templates import render_email
+
+        subject, body, html = render_email(type, context or {})
+        return await self.create_notification(
+            NotificationCreate(
+                user_id=user_id,
+                merchant_id=merchant_id,
+                type=type,
+                channel=channel,
+                subject=subject,
+                body=body,
+                html_body=html if channel == NotificationChannel.EMAIL.value else None,
+                related_order_id=related_order_id,
+                related_payment_id=related_payment_id,
+                related_product_id=related_product_id,
+                payload=context,
+            )
         )
 
     async def create_notification(self, data: NotificationCreate) -> NotificationResponse:

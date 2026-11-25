@@ -9,19 +9,23 @@ endpoint used by the worker.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_active_user
+from app.db.session import get_db
+from app.modules.notifications.delivery import EmailNotificationSender
 from app.modules.notifications.service.base import NotificationService
 from app.modules.notifications.service.dependency import get_notification_service
 from app.modules.merchants.service.base import MerchantService
 from app.modules.merchants.service.dependency import get_merchant_service
-from app.schemas.notification import NotificationResponse
+from app.schemas.notification import NotificationCreate, NotificationResponse
 
 router = APIRouter()
 
 get_current_active_user_depends = Depends(get_current_active_user)
 get_notification_service_depends = Depends(get_notification_service)
 get_merchant_service_depends = Depends(get_merchant_service)
+get_db_depends = Depends(get_db)
 
 
 @router.get("/me", response_model=list[NotificationResponse])
@@ -55,6 +59,50 @@ async def get_notification(
     ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
     return n
+
+
+@router.post("/test-email", response_model=NotificationResponse)
+async def send_test_email(
+    current_user= get_current_active_user_depends,
+    service: NotificationService = get_notification_service_depends,
+    db: AsyncSession = get_db_depends,
+):
+    """Send a test email to the signed-in user via the Resend pipeline.
+
+    Creates a templated ``test_email`` notification (queued for the worker)
+    AND sends it immediately through the email sender so the caller gets
+    instant confirmation that Resend is configured correctly.
+    """
+    from app.core.config import settings
+    from app.models.user import User
+    from sqlalchemy import select
+
+    # Resolve the caller's email.
+    user = (await db.execute(select(User).where(User.id == current_user.id))).scalar_one_or_none()
+    if user is None or not user.email:
+        raise HTTPException(status_code=404, detail="User email not found")
+
+    # Queue a templated notification (worker will also deliver it).
+    n = await service.notify(
+        type="test_email",
+        channel="email",
+        user_id=str(current_user.id),
+        context={"recipient_email": user.email},
+    )
+
+    # Send immediately for instant feedback.
+    if not settings.RESEND_API_KEY or not settings.RESEND_FROM_EMAIL:
+        raise HTTPException(
+            status_code=400,
+            detail="Resend is not configured (RESEND_API_KEY / RESEND_FROM_EMAIL missing)",
+        )
+    try:
+        receipt = await EmailNotificationSender().send(n, user.email)
+        await service.mark_sent(n.id, receipt.provider, receipt.reference)
+    except Exception as e:
+        await service.mark_failed(n.id)
+        raise HTTPException(status_code=502, detail=f"Email could not be sent: {e}")
+    return await service.get_notification(n.id)
 
 
 def get_router():

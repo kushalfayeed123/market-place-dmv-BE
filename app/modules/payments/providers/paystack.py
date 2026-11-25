@@ -15,6 +15,8 @@ import httpx
 
 from app.core.config import settings
 from app.modules.payments.providers.base import (
+    BankAccountResolution,
+    BankInfo,
     PaymentInitResult,
     PaymentProvider,
     PaymentVerificationResult,
@@ -174,6 +176,7 @@ class PaystackProvider(PaymentProvider):
         bank_code: str | None = None,
         account_number: str | None = None,
         percentage_charge: float = 0.0,
+        settlement_schedule: str = "auto",
     ) -> str | None:
         """Create a Paystack subaccount for a merchant.
 
@@ -186,6 +189,7 @@ class PaystackProvider(PaymentProvider):
         body: dict = {
             "business_name": business_name,
             "percentage_charge": percentage_charge,
+            "settlement_schedule": settlement_schedule,
         }
         if bank_code and account_number:
             body["settlement_bank"] = bank_code
@@ -202,10 +206,182 @@ class PaystackProvider(PaymentProvider):
                 )
                 data = resp.json()
             if resp.status_code not in (200, 201) or not data.get("status", False):
-                return f"ACCT_stub_{uuid.uuid4().hex[:16]}"
+                raise RuntimeError(
+                    f"Paystack subaccount creation failed: {data.get('message', 'unknown error')}"
+                )
             return data.get("data", {}).get("subaccount_code")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Paystack subaccount creation failed: {exc}") from exc
+
+    # ── Bank account validation & payouts ──────────────────────────────────
+
+    async def resolve_bank_account(
+        self, bank_code: str, account_number: str, currency: str = "NGN"
+    ) -> BankAccountResolution | None:
+        """Validate a bank account via Paystack's bank-resolve endpoint.
+
+        Returns the registered account name, or raises ``ValueError`` when the
+        account is invalid. Stub mode returns a synthetic name.
+        """
+        account_number = (account_number or "").strip()
+        bank_code = (bank_code or "").strip()
+        if not account_number or not bank_code:
+            raise ValueError("account_number and bank_code are required to verify an account")
+        if not self._configured:
+            return BankAccountResolution(
+                account_number=account_number,
+                account_name="TEST ACCOUNT",
+                bank_code=bank_code,
+            )
+        headers = {"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"}
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                # GET /bank/resolve?account_number=...&bank_code=... — the
+                # registered account name is returned by Paystack; the user
+                # never types it.
+                resp = await client.get(
+                    f"{PAYSTACK_API_BASE}/bank/resolve",
+                    params={"account_number": account_number, "bank_code": bank_code},
+                    headers=headers,
+                )
+                data = resp.json()
+        except Exception as exc:
+            raise ValueError(f"Could not verify bank account: {exc}") from exc
+        if resp.status_code != 200 or not data.get("status", False):
+            raise ValueError(
+                f"Invalid bank account: {data.get('message', 'account could not be resolved')}"
+            )
+        d = data.get("data", {})
+        if not d.get("account_name"):
+            raise ValueError("Bank account could not be resolved — check the bank and account number")
+        return BankAccountResolution(
+            account_number=d.get("account_number", account_number),
+            account_name=d.get("account_name", ""),
+            bank_code=bank_code,
+        )
+
+    async def list_banks(self, country: str = "NG", currency: str = "NGN") -> list[BankInfo]:
+        """List Paystack-supported banks.
+
+        Paystack's ``GET /bank`` endpoint takes **no parameters** and returns
+        every supported bank; we filter to the requested country/currency
+        client-side when those fields are present on each bank record.
+        """
+        if not self._configured:
+            return [
+                BankInfo(code="044", name="Access Bank", country="NG", currency="NGN"),
+                BankInfo(code="011", name="First Bank", country="NG", currency="NGN"),
+                BankInfo(code="058", name="GTBank", country="NG", currency="NGN"),
+                BankInfo(code="070", name="Fidelity Bank", country="NG", currency="NGN"),
+                BankInfo(code="232", name="Sterling Bank", country="NG", currency="NGN"),
+                BankInfo(code="221", name="Stanbic IBTC", country="NG", currency="NGN"),
+            ]
+        headers = {"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"}
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                # GET /bank takes NO parameters and returns every supported bank.
+                resp = await client.get(f"{PAYSTACK_API_BASE}/bank", headers=headers)
+                data = resp.json()
         except Exception:
-            return f"ACCT_stub_{uuid.uuid4().hex[:16]}"
+            return []
+        # Paystack signals failure with status=false (boolean) OR a 4xx code;
+        # some error bodies use status=true with data=null — treat that as empty too.
+        if resp.status_code != 200 or data.get("status") is not True:
+            return []
+        raw = data.get("data")
+        if not isinstance(raw, list) or not raw:
+            return []
+        banks: list[BankInfo] = []
+        for b in raw:
+            if not isinstance(b, dict):
+                continue
+            banks.append(
+                BankInfo(
+                    code=str(b.get("code", "")),
+                    name=str(b.get("name", "")),
+                    country=str(b.get("country") or country).upper(),
+                    currency=str(b.get("currency") or currency).upper(),
+                )
+            )
+        return banks
+
+    async def create_transfer_recipient(
+        self,
+        account_number: str,
+        bank_code: str,
+        account_name: str,
+        currency: str = "NGN",
+    ) -> str | None:
+        """Create a Paystack transfer recipient for payouts."""
+        if not self._configured:
+            return f"RCP_stub_{uuid.uuid4().hex[:16]}"
+        body = {
+            "type": "nuban",
+            "name": account_name,
+            "account_number": account_number,
+            "bank_code": bank_code,
+            "currency": currency,
+        }
+        headers = {
+            "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{PAYSTACK_API_BASE}/transferrecipient", json=body, headers=headers
+                )
+                data = resp.json()
+            if resp.status_code not in (200, 201) or not data.get("status", False):
+                raise RuntimeError(
+                    f"Transfer recipient creation failed: {data.get('message', 'unknown error')}"
+                )
+            return data.get("data", {}).get("recipient_code")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Transfer recipient creation failed: {exc}") from exc
+
+    async def initiate_transfer(
+        self,
+        recipient_code: str,
+        amount: int,
+        currency: str,
+        reference: str,
+        reason: str = "",
+    ) -> str | None:
+        """Initiate a Paystack transfer (payout) to a recipient."""
+        if not self._configured:
+            return f"TRF_stub_{uuid.uuid4().hex[:16]}"
+        body = {
+            "source": "balance",
+            "amount": amount,
+            "reference": reference,
+            "recipient": recipient_code,
+            "reason": reason or "Merchant payout",
+            "currency": currency,
+        }
+        headers = {
+            "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{PAYSTACK_API_BASE}/transfer", json=body, headers=headers
+                )
+                data = resp.json()
+            if resp.status_code not in (200, 201) or not data.get("status", False):
+                raise RuntimeError(
+                    f"Payout transfer failed: {data.get('message', 'unknown error')}"
+                )
+            return data.get("data", {}).get("transfer_code") or data.get("data", {}).get("reference")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Payout transfer failed: {exc}") from exc
 
     async def create_split(
         self,
