@@ -67,8 +67,19 @@ backend/
 
 The notification worker sends email through the [Resend API](https://resend.com/docs/api-reference/emails/send-email).
 Set `RESEND_API_KEY` and `RESEND_FROM_EMAIL` in the backend environment. The
-sender address must use a domain verified in your Resend account. Start the
-worker separately from the API with `python -m app.workers.notification_worker`.
+sender address must use a domain verified in your Resend account.
+
+The worker also runs **in-process** — it is started automatically as a
+background task in the app's startup event (and stopped on shutdown), so no
+separate process is required. (`python -m app.workers.notification_worker`
+still works for running it standalone.)
+
+All outbound email is rendered through the branded templates in
+`app/modules/notifications/templates.py` (header wordmark, content card,
+optional CTA button, footer). The service layer automatically generates the
+HTML body for every `email`-channel notification, so callers only need to
+supply `type` + `payload` context — see `render_email()` for the available
+context keys per notification type.
 
 ### Prerequisites
 
@@ -279,7 +290,7 @@ See the automatically generated API documentation at `/docs` or `/redoc` for com
 - `PUT /api/v1/catalog/inventory/{variant_id}` - Update inventory
 
 ### Orders
-- `POST /api/v1/orders/checkout` - Create order (requires idempotency key)
+- `POST /api/v1/orders/checkout` - Create order (requires idempotency key). For delivery, provide a contact phone as `buyer_phone` or `delivery_address.phone`.
 - `GET /api/v1/orders/{order_id}` - Get order details
 - `GET /api/v1/orders/` - List user's orders
 - `POST /api/v1/orders/{order_id}/approve` - Confirm payment (merchant; `pending`|`awaiting_approval` → `paid`)
@@ -288,6 +299,7 @@ See the automatically generated API documentation at `/docs` or `/redoc` for com
 - `POST /api/v1/orders/{order_id}/cancel` - Cancel order (merchant; `pending`|`accepted`|`paid`|`partially_fulfilled` → `cancelled`)
 
 ### Payments
+- After checkout, call `GET /api/v1/payments/methods` to list available choices, then `POST /api/v1/payments/process` with the selected `provider` (`pay_on_delivery` or an implemented provider such as `paystack`).
 - `POST /api/v1/payments/process` - Process payment (requires idempotency key)
 - `POST /api/v1/payments/{payment_id}/refund` - Refund payment (requires idempotency key, platform admin)
 - `POST /api/v1/payments/webhooks/paystack` - Paystack webhook endpoint

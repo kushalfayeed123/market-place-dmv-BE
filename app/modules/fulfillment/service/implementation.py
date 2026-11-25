@@ -127,6 +127,12 @@ class FulfillmentServiceImpl(FulfillmentService):
                             f"Your order {order.order_number} has been handed off for fulfillment{carrier_text}{tracking_text}."
                         ),
                         related_order_id=str(order.id),
+                        payload={
+                            "order_number": order.order_number,
+                            "status": "Being prepared",
+                            "detail": f"Handed off for fulfillment{carrier_text}{tracking_text}",
+                            "action_label": "View order",
+                        },
                     )
                 )
             except Exception:
@@ -271,6 +277,12 @@ class FulfillmentServiceImpl(FulfillmentService):
                                 f"Your order {order.order_number} is now {status_label.lower()}{carrier_text}{tracking_text}."
                             ),
                             related_order_id=str(order.id),
+                            payload={
+                                "order_number": order.order_number,
+                                "status": status_label,
+                                "detail": f"{carrier_text}{tracking_text}".strip(),
+                                "action_label": "View order",
+                            },
                         )
                     )
                     # Check if all fulfillments are delivered → mark order fulfilled
@@ -322,6 +334,7 @@ class FulfillmentServiceImpl(FulfillmentService):
                                 f"Thank you for your purchase!"
                             ),
                             related_order_id=str(order.id),
+                            payload={"order_number": order.order_number, "action_label": "View order"},
                         )
                     )
                 except Exception:
@@ -387,6 +400,7 @@ class FulfillmentServiceImpl(FulfillmentService):
                                 f"Use the download link provided in your order details."
                             ),
                             related_order_id=str(order.id),
+                            payload={"order_number": order.order_number, "action_label": "View order"},
                         )
                     )
                     await self._maybe_mark_order_fulfilled(order.id)
@@ -452,6 +466,12 @@ class FulfillmentServiceImpl(FulfillmentService):
                                 f"Your order {order.order_number} is now {status_label.lower()}{carrier_text}{tracking_text}."
                             ),
                             related_order_id=str(order.id),
+                            payload={
+                                "order_number": order.order_number,
+                                "status": status_label,
+                                "detail": f"{carrier_text}{tracking_text}".strip(),
+                                "action_label": "View order",
+                            },
                         )
                     )
                     await self._maybe_mark_order_fulfilled(order.id)
@@ -521,6 +541,12 @@ class FulfillmentServiceImpl(FulfillmentService):
                                 f"{carrier_text}{tracking_text}. Thank you for your purchase!"
                             ),
                             related_order_id=str(order.id),
+                            payload={
+                                "order_number": order.order_number,
+                                "status": "Delivered",
+                                "detail": f"{carrier_text}{tracking_text}".strip(),
+                                "action_label": "View order",
+                            },
                         )
                     )
                     await self._maybe_mark_order_fulfilled(order.id)

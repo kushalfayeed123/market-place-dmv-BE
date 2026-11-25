@@ -89,6 +89,21 @@ class NotificationServiceImpl(NotificationService):
         if data.payload is not None:
             payload_text = json.dumps(data.payload)
 
+        # Every email is rendered through the branded template engine so all
+        # outbound email is consistently styled.  Callers may still supply a
+        # custom subject/body (used as plain text); the HTML body is always
+        # generated from the template unless explicitly provided.
+        html_body = data.html_body
+        if data.channel == NotificationChannel.EMAIL.value and not html_body:
+            from app.modules.notifications.templates import render_email
+
+            context = dict(data.payload) if data.payload else {}
+            context.setdefault("subject", data.subject)
+            context.setdefault("body", data.body)
+            if data.related_order_id:
+                context.setdefault("related_order_id", data.related_order_id)
+            _, _, html_body = render_email(data.type, context)
+
         n = Notification(
             user_id=to_uuid(data.user_id) if data.user_id else None,
             merchant_id=to_uuid(data.merchant_id) if data.merchant_id else None,
@@ -97,7 +112,7 @@ class NotificationServiceImpl(NotificationService):
             status=data.status or NotificationStatus.PENDING.value,
             subject=data.subject,
             body=data.body,
-            html_body=data.html_body,
+            html_body=html_body,
             related_order_id=to_uuid(data.related_order_id) if data.related_order_id else None,
             related_payment_id=to_uuid(data.related_payment_id) if data.related_payment_id else None,
             related_product_id=to_uuid(data.related_product_id) if data.related_product_id else None,

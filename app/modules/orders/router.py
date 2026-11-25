@@ -99,6 +99,13 @@ async def checkout(
             subject=f"Order {response_data.order_number} confirmed",
             body=f"Your order {response_data.order_number} has been placed successfully.",
             related_order_id=response_data.id,
+            payload={
+                "order_number": response_data.order_number,
+                "total": str(response_data.total_amount),
+                "currency": response_data.currency,
+                "items_summary": f"{response_data.item_count} item(s)",
+                "action_label": "View order",
+            },
         )
     )
     seen_merchants: set[str] = set()
@@ -113,6 +120,12 @@ async def checkout(
                     subject=f"New order {response_data.order_number} received",
                     body=f"You received a new order {response_data.order_number}.",
                     related_order_id=response_data.id,
+                    payload={
+                        "order_number": response_data.order_number,
+                        "total": str(response_data.total_amount),
+                        "currency": response_data.currency,
+                        "action_label": "View order",
+                    },
                 )
             )
 
@@ -281,6 +294,7 @@ async def submit_proof_of_payment(
                     subject=f"Proof of payment for order {response_data.order_number}",
                     body="A buyer has submitted proof of payment. Please review and approve.",
                     related_order_id=order_id,
+                    payload={"order_number": response_data.order_number, "action_label": "Review order"},
                 )
             )
 
@@ -345,6 +359,7 @@ async def approve_order(
                 subject=f"Payment confirmed — Order {response_data.order_number}",
                 body="Your payment has been confirmed by the merchant.",
                 related_order_id=order_id,
+                payload={"order_number": response_data.order_number, "action_label": "View order"},
             )
         )
 

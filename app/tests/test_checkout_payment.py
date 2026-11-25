@@ -321,6 +321,33 @@ async def test_physical_checkout_requires_delivery_address(
 
 
 @pytest.mark.asyncio
+async def test_delivery_checkout_uses_phone_from_delivery_address(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict
+):
+    response = await client.post(
+        "/api/v1/orders/checkout",
+        json={
+            "items": [{"variant_id": seed_data["variant_id"], "quantity": 1}],
+            "delivery_address": {
+                "full_name": "Michael Ajanaku",
+                "phone": "07015902708",
+                "address_line_1": "72 Yellow Street Solutionist Estate Karshi",
+                "city": "Abuja",
+                "state": "FCT",
+                "country": "Nigeria",
+            },
+            "fulfillment_option": "delivery",
+        },
+        headers={**buyer_headers, "Idempotency-Key": "delivery-phone-from-address"},
+    )
+
+    assert response.status_code == 201, response.text
+    order = response.json()
+    assert order["buyer_phone"] == "07015902708"
+    assert order["delivery_address"]["phone"] == "07015902708"
+
+
+@pytest.mark.asyncio
 async def test_digital_checkout_does_not_require_delivery_address(
     client: AsyncClient, buyer_headers: dict, seed_data: dict, db
 ):

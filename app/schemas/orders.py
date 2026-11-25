@@ -32,7 +32,10 @@ class CheckoutRequest(BaseModel):
         None,
         min_length=7,
         max_length=32,
-        description="Buyer contact phone number (E.164 preferred). Required for delivery orders.",
+        description=(
+            "Buyer contact phone number (E.164 preferred). Required for delivery orders; "
+            "falls back to delivery_address.phone when omitted."
+        ),
     )
     # Fulfillment option: "delivery" or "pickup"
     fulfillment_option: str | None = Field(

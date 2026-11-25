@@ -727,6 +727,7 @@ class PaymentServiceImpl(PaymentService):
                                         ),
                                         related_order_id=str(o.id),
                                         related_payment_id=str(pt.id),
+                                        payload={"order_number": o.order_number, "action_label": "View order"},
                                     )
                                 )
                                 for m_id in merchant_ids:
@@ -785,6 +786,7 @@ class PaymentServiceImpl(PaymentService):
                                         ),
                                         related_order_id=str(o.id),
                                         related_payment_id=str(pt.id),
+                                        payload={"order_number": o.order_number, "action_label": "View order"},
                                     )
                                 )
                             except Exception:

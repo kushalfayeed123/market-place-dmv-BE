@@ -203,7 +203,12 @@ class OrderServiceImpl(OrderService):
         # Buyer phone: required whenever the order involves physical delivery
         # (the merchant needs it to coordinate drop-off). Falls back to the
         # buyer's profile phone when not supplied at checkout.
-        buyer_phone = (checkout_data.buyer_phone or "").strip() or None
+        buyer_phone = (checkout_data.buyer_phone or "").strip()
+        if not buyer_phone and checkout_data.delivery_address:
+            address_phone = checkout_data.delivery_address.get("phone")
+            if isinstance(address_phone, str):
+                buyer_phone = address_phone.strip()
+        buyer_phone = buyer_phone or None
         if buyer_phone is None and requires_delivery and fulfillment_option != "pickup":
             buyer_result = await self._db.execute(
                 select(User.phone).where(User.id == to_uuid(buyer_id))
@@ -258,6 +263,13 @@ class OrderServiceImpl(OrderService):
                             f"Items: {buyer_items_summary}. Total: {new_order.total_amount} {new_order.currency}."
                         ),
                         related_order_id=str(new_order.id),
+                        payload={
+                            "order_number": new_order.order_number,
+                            "total": str(new_order.total_amount),
+                            "currency": new_order.currency,
+                            "items_summary": buyer_items_summary,
+                            "action_label": "View order",
+                        },
                     )
                 )
                 # Buyer: in-app copy
@@ -286,6 +298,12 @@ class OrderServiceImpl(OrderService):
                                 f"totaling {new_order.total_amount} {new_order.currency}."
                             ),
                             related_order_id=str(new_order.id),
+                            payload={
+                                "order_number": new_order.order_number,
+                                "total": str(new_order.total_amount),
+                                "currency": new_order.currency,
+                                "action_label": "View order",
+                            },
                         )
                     )
                     await self._notification_service.create_notification(
@@ -688,6 +706,7 @@ class OrderServiceImpl(OrderService):
                             f"Your order is now being prepared for fulfillment."
                         ),
                         related_order_id=str(order.id),
+                        payload={"order_number": order.order_number, "action_label": "View order"},
                     )
                 )
                 await self._notification_service.create_notification(
@@ -827,6 +846,7 @@ class OrderServiceImpl(OrderService):
                             f"Thank you for your purchase!"
                         ),
                         related_order_id=str(order.id),
+                        payload={"order_number": order.order_number, "action_label": "View order"},
                     )
                 )
                 await self._notification_service.create_notification(

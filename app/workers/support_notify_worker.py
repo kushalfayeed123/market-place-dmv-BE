@@ -62,15 +62,26 @@ async def deliver_webhook(event: WebhookEvent) -> bool:
 
 
 def deliver_email(event: WebhookEvent) -> bool:
-    """Send a plain-text email to SUPPORT_EMAIL_TO. True when sent."""
+    """Send a branded email to SUPPORT_EMAIL_TO. True when sent."""
     if not (settings.SUPPORT_SMTP_HOST and settings.SUPPORT_EMAIL_TO and settings.SUPPORT_EMAIL_FROM):
         return False
+    from app.modules.notifications.templates import render_email
+
     payload = json.loads(event.payload) if event.payload else {}
+    subject, text, html = render_email(
+        "support_ticket",
+        {
+            "event_type": event.event_type,
+            "ticket_number": payload.get("ticket_number", event.event_id),
+            "payload_json": json.dumps(payload, indent=2, default=str),
+        },
+    )
     msg = EmailMessage()
-    msg["Subject"] = f"[Support] {event.event_type} — {payload.get('ticket_number', event.event_id)}"
+    msg["Subject"] = subject
     msg["From"] = settings.SUPPORT_EMAIL_FROM
     msg["To"] = settings.SUPPORT_EMAIL_TO
-    msg.set_content(json.dumps(payload, indent=2, default=str))
+    msg.set_content(text)
+    msg.add_alternative(html, subtype="html")
     with smtplib.SMTP(settings.SUPPORT_SMTP_HOST, settings.SUPPORT_SMTP_PORT, timeout=15) as smtp:
         if settings.SUPPORT_SMTP_USER:
             smtp.starttls()
