@@ -541,13 +541,23 @@ class CatalogServiceImpl(CatalogService):
         # Create initial inventory record with provided values or defaults
         inventory = Inventory(
             variant_id=new_variant.id,
-            quantity_available=variant_data.quantity_available or 0,
-            quantity_reserved=variant_data.quantity_reserved or 0,
+            quantity_available=(
+                variant_data.quantity_available
+                if variant_data.quantity_available is not None
+                else 0
+            ),
+            quantity_reserved=(
+                variant_data.quantity_reserved
+                if variant_data.quantity_reserved is not None
+                else 0
+            ),
         )
         self._db.add(inventory)
         await self._db.commit()
 
-        return self._variant_to_response(new_variant)
+        return self._variant_to_response(
+            new_variant, quantity_available=inventory.quantity_available
+        )
 
     async def update_inventory(
         self, variant_id: str, inventory_data: InventoryUpdate
@@ -864,10 +874,25 @@ class CatalogServiceImpl(CatalogService):
             raise ValueError("Product variant not found")
 
         update_data = variant_data.model_dump(exclude_unset=True)
+        quantity_available = update_data.pop("quantity_available", None)
         if "attributes" in update_data:
             update_data["attributes"] = json.dumps(update_data["attributes"] or {})
         for key, value in update_data.items():
             setattr(variant, key, value)
+
+        if quantity_available is not None:
+            result = await self._db.execute(
+                select(Inventory).where(Inventory.variant_id == variant_uuid)
+            )
+            inventory = result.scalar_one_or_none()
+            if inventory is None:
+                inventory = Inventory(
+                    variant_id=variant_uuid,
+                    quantity_available=0,
+                    quantity_reserved=0,
+                )
+                self._db.add(inventory)
+            inventory.quantity_available = quantity_available
 
         await self._db.commit()
         await self._db.refresh(variant)

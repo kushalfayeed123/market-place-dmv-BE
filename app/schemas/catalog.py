@@ -110,6 +110,7 @@ class ProductVariantUpdate(BaseModel):
     price_override_amount: int | None = Field(None, ge=0)
     price_override_currency: str | None = Field(None, min_length=3, max_length=3)
     inventory_policy: str | None = Field(None, pattern="^(tracked|untracked|unlimited)$")
+    quantity_available: int | None = Field(None, ge=0)
 
     model_config = {"extra": "forbid"}
 

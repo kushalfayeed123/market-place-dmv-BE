@@ -414,7 +414,7 @@ async def update_product_variant(
     service: CatalogService = get_catalog_service_depends,
     idempotency: dict = get_idempotency_depends,
 ):
-    """Partially update a product variant (sku, attributes, price override, stock policy)."""
+    """Partially update a product variant, including its available stock."""
     if current_user.role.value not in ["merchant_owner", "merchant_staff", "platform_admin"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

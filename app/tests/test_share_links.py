@@ -345,3 +345,32 @@ class TestDeactivateLink:
     async def test_resolve_unknown_code_404(self, client: AsyncClient):
         resp = await client.get("/api/v1/links/public/doesnotexist123")
         assert resp.status_code == 404, resp.text
+
+
+async def test_variant_inventory_can_be_set_on_create_and_patch(
+    client: AsyncClient, merchant_owner_token: str, link_setup: dict
+):
+    headers = {
+        "Authorization": f"Bearer {merchant_owner_token}",
+        "Idempotency-Key": "variant-inventory-create",
+    }
+    create_resp = await client.post(
+        f"/api/v1/catalog/products/{link_setup['product_id_1']}/variants",
+        json={
+            "sku": "LINK-PROD1-STOCKED-SKU",
+            "inventory_policy": "tracked",
+            "quantity_available": 10,
+        },
+        headers=headers,
+    )
+    assert create_resp.status_code == 200, create_resp.text
+    variant = create_resp.json()
+    assert variant["quantity_available"] == 10
+
+    patch_resp = await client.patch(
+        f"/api/v1/catalog/products/{link_setup['product_id_1']}/variants/{variant['id']}",
+        json={"quantity_available": 6},
+        headers={**headers, "Idempotency-Key": "variant-inventory-patch"},
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    assert patch_resp.json()["quantity_available"] == 6
