@@ -182,19 +182,29 @@ class LedgerServiceImpl(LedgerService):
         if not merchant:
             raise ValueError("Merchant not found")
 
-        # Calculate balance from ledger entries
+        # Calculate balance from the merchant's WALLET entries only.
+        # platform_revenue rows (sale/commission) also carry merchant_id and
+        # must NOT be summed into the merchant balance — doing so cancels the
+        # wallet credits and can even drive the balance negative. Superseded
+        # entries are excluded: a payout_release supersedes its payout_hold,
+        # so counting both would double-count the funds.
         balance_query = """
-            SELECT 
+            SELECT
                 SUM(
-                    CASE 
-                        WHEN direction = 'credit' THEN amount 
-                        WHEN direction = 'debit' THEN -amount 
+                    CASE
+                        WHEN direction = 'credit' THEN amount
+                        WHEN direction = 'debit' THEN -amount
                         ELSE 0
                     END
                 ) as balance
             FROM ledger_entries
             WHERE merchant_id = :merchant_id
-              AND entry_type IN ('sale', 'commission', 'payout_release', 'payout_paid', 'refund')
+              AND account_type = 'merchant_wallet'
+              AND id NOT IN (
+                SELECT supersedes_entry_id
+                FROM ledger_entries
+                WHERE supersedes_entry_id IS NOT NULL
+              )
         """
 
         result = await self._db.execute(
@@ -204,24 +214,31 @@ class LedgerServiceImpl(LedgerService):
         balance_row = result.fetchone()
         balance = balance_row[0] if balance_row and balance_row[0] is not None else 0
 
-        # Get currency (assume NGN for simplicity)
-        currency = "NGN"
+        # Get currency from the merchant's wallet entries (default NGN)
+        currency_row = await self._db.execute(
+            text(
+                "SELECT currency FROM ledger_entries "
+                "WHERE merchant_id = :merchant_id AND account_type = 'merchant_wallet' "
+                "ORDER BY created_at DESC LIMIT 1"
+            ),
+            {"merchant_id": to_uuid(merchant_id).hex},
+        )
+        currency = currency_row.scalar() or "NGN"
 
-        # Calculate held balance (funds in payout_hold state)
+        # Held balance = payout_hold CREDITS on the wallet that have not been
+        # released (superseded) yet. Holds are written as credits, so summing
+        # debits would always yield 0.
         held_query = """
-            SELECT 
-                SUM(
-                    CASE 
-                        WHEN direction = 'debit' THEN amount 
-                        ELSE 0
-                    END
-                ) as held_balance
+            SELECT
+                SUM(amount) as held_balance
             FROM ledger_entries
             WHERE merchant_id = :merchant_id
+              AND account_type = 'merchant_wallet'
               AND entry_type = 'payout_hold'
+              AND direction = 'credit'
               AND id NOT IN (
-                SELECT supersedes_entry_id 
-                FROM ledger_entries 
+                SELECT supersedes_entry_id
+                FROM ledger_entries
                 WHERE supersedes_entry_id IS NOT NULL
               )
         """
