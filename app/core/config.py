@@ -127,7 +127,7 @@ class Settings(BaseSettings):
     NOTIFICATION_TWILIO_FROM: str = Field("", env="NOTIFICATION_TWILIO_FROM")
 
     # Frontend URL — used by the stub Paystack redirect to return buyers to the store
-    FRONTEND_URL: str = Field("http://localhost:3000", env="FRONTEND_URL")
+    FRONTEND_URL: str = Field("", env="FRONTEND_URL")
 
     # Public base URL of the storefront frontend — used to build shareable
     # store/product links (e.g. {PUBLIC_BASE_URL}/s/{code}). Defaults to the

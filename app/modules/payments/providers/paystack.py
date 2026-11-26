@@ -80,12 +80,16 @@ class PaystackProvider(PaymentProvider):
             return self._stub_initialize(order_id, amount, currency, metadata, buyer_email=buyer_email)
 
         # Build the request body for Paystack's initialize endpoint.
+        # The callback_url must be the storefront frontend — Paystack appends
+        # ?trxref=...&reference=... to it after payment, and the frontend uses
+        # those params to reload the checkout state and verify the payment.
+        frontend_base = (settings.PUBLIC_BASE_URL or settings.FRONTEND_URL or "").rstrip("/")
         body: dict = {
             "email": buyer_email,
             "amount": amount,
             "currency": currency,
             "reference": f"ord_{order_id}_{uuid.uuid4().hex[:12]}",
-            "callback_url": callback_url or settings.SUPPORT_WEBHOOK_URL,
+            "callback_url": (callback_url or frontend_base or None),
         }
         if split_code:
             body["split_code"] = split_code
