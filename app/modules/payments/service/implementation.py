@@ -380,13 +380,13 @@ class PaymentServiceImpl(PaymentService):
             return await self.get_payment_by_order(order_id, user_id)
 
         if verification.status == "success":
-            if (
-                verification.amount != payment.amount
-                or verification.currency.upper() != payment.currency.upper()
-            ):
-                raise ValueError(
-                    "Provider payment amount or currency does not match the order."
-                )
+            if verification.currency.upper() != payment.currency.upper():
+                raise ValueError("Provider payment currency does not match the order.")
+            # The provider adds its commission/fees at the point of payment, so the
+            # verified amount is the ACTUAL amount paid — trust the provider
+            # verification (the same source of truth as the webhook) instead of
+            # comparing against the order total.
+            payment.amount = verification.amount
             payment.status = "success"
             if order.status == OrderStatus.PENDING.value:
                 order.status = OrderStatus.PAID.value
@@ -684,69 +684,102 @@ class PaymentServiceImpl(PaymentService):
                     )
                     pt = existing.scalar_one_or_none()
                     if pt and pt.status != "success":
-                        pt.status = "success"
-                        # Mark the order as paid
-                        o = await self._db.get(Order, pt.order_id)
-                        if o and o.status == "pending":
-                            o.status = "paid"
-                        await self._db.refresh(pt)
-
-                        # ── Ledger: per-item sale + commission + payout_hold ──
-                        # Online payments must credit merchant wallets too, not
-                        # just pay-on-delivery. Idempotent: skip when entries for
-                        # this payment transaction already exist.
-                        if o is not None:
-                            already = await self._db.execute(
-                                select(LedgerEntry.id).where(
-                                    LedgerEntry.payment_transaction_id == pt.id
-                                ).limit(1)
-                            )
-                            if already.scalar_one_or_none() is None:
-                                await post_order_ledger_entries(
-                                    self._db, o, pt, created_by=str(o.buyer_id)
-                                )
-
-                        # ── Notifications: payment confirmed ──────────────
-                        if self._notification_service:
+                        # The webhook is the source of truth for payment state, but
+                        # before releasing any value (ledger credit, notifications,
+                        # digital delivery) confirm the transaction with the
+                        # provider's own verification endpoint.
+                        provider_instance = get_provider(provider)
+                        verification = None
+                        if provider_instance is not None:
                             try:
-                                items_result = await self._db.execute(
-                                    select(OrderItem).where(OrderItem.order_id == o.id)
-                                )
-                                order_items = items_result.scalars().all()
-                                merchant_ids = {str(i.merchant_id) for i in order_items}
+                                verification = await provider_instance.verify_transaction_details(ref)
+                            except RuntimeError:
+                                verification = None
+                        # Stub/dev mode (provider not configured) returns None —
+                        # in that case trust the webhook payload itself.
+                        provider_confirmed = verification is None or (
+                            verification.status == "success"
+                            and (not verification.currency or verification.currency.upper() == pt.currency.upper())
+                        )
+                        if not provider_confirmed:
+                            # Provider disputes this webhook — leave the payment
+                            # pending; the buyer-facing verify endpoint or a retry
+                            # webhook will reconcile it.
+                            pass
+                        else:
+                            pt.status = "success"
+                            # The ACTUAL amount paid (order total + provider
+                            # commission/fees) comes from the provider verification,
+                            # falling back to the webhook payload's data.amount.
+                            paid_amount = verification.amount if verification is not None else None
+                            if paid_amount is None and isinstance(payload_dict, dict):
+                                data_obj = payload_dict.get("data")
+                                if isinstance(data_obj, dict) and isinstance(data_obj.get("amount"), int):
+                                    paid_amount = data_obj["amount"]
+                            if paid_amount is not None:
+                                pt.amount = paid_amount
+                            # Mark the order as paid
+                            o = await self._db.get(Order, pt.order_id)
+                            if o and o.status == "pending":
+                                o.status = "paid"
+                            await self._db.refresh(pt)
 
-                                await self._notification_service.create_notification(
-                                    NotificationCreate(
-                                        user_id=str(o.buyer_id),
-                                        type=NotificationType.PAYMENT_CONFIRMED.value,
-                                        channel=NotificationChannel.EMAIL.value,
-                                        subject=f"Payment confirmed — Order {o.order_number}",
-                                        body=(
-                                            f"Your payment for order {o.order_number} has been confirmed. "
-                                            f"Your order is now being prepared for fulfillment."
-                                        ),
-                                        related_order_id=str(o.id),
-                                        related_payment_id=str(pt.id),
-                                        payload={"order_number": o.order_number, "action_label": "View order"},
-                                    )
+                            # ── Ledger: per-item sale + commission + payout_hold ──
+                            # Online payments must credit merchant wallets too, not
+                            # just pay-on-delivery. Idempotent: skip when entries for
+                            # this payment transaction already exist.
+                            if o is not None:
+                                already = await self._db.execute(
+                                    select(LedgerEntry.id).where(
+                                        LedgerEntry.payment_transaction_id == pt.id
+                                    ).limit(1)
                                 )
-                                for m_id in merchant_ids:
+                                if already.scalar_one_or_none() is None:
+                                    await post_order_ledger_entries(
+                                        self._db, o, pt, created_by=str(o.buyer_id)
+                                    )
+
+                            # ── Notifications: payment confirmed ──────────────
+                            if self._notification_service:
+                                try:
+                                    items_result = await self._db.execute(
+                                        select(OrderItem).where(OrderItem.order_id == o.id)
+                                    )
+                                    order_items = items_result.scalars().all()
+                                    merchant_ids = {str(i.merchant_id) for i in order_items}
+
                                     await self._notification_service.create_notification(
                                         NotificationCreate(
-                                            merchant_id=m_id,
-                                            type=NotificationType.MERCHANT_NEW_ORDER.value,
-                                            channel=NotificationChannel.PUSH.value,
-                                            subject=f"New order paid — {o.order_number}",
+                                            user_id=str(o.buyer_id),
+                                            type=NotificationType.PAYMENT_CONFIRMED.value,
+                                            channel=NotificationChannel.EMAIL.value,
+                                            subject=f"Payment confirmed — Order {o.order_number}",
                                             body=(
-                                                f"Order {o.order_number} has been paid "
-                                                f"({o.total_amount} {o.currency}). Please fulfill."
+                                                f"Your payment for order {o.order_number} has been confirmed. "
+                                                f"Your order is now being prepared for fulfillment."
                                             ),
                                             related_order_id=str(o.id),
                                             related_payment_id=str(pt.id),
+                                            payload={"order_number": o.order_number, "action_label": "View order"},
                                         )
                                     )
-                            except Exception:
-                                pass
+                                    for m_id in merchant_ids:
+                                        await self._notification_service.create_notification(
+                                            NotificationCreate(
+                                                merchant_id=m_id,
+                                                type=NotificationType.MERCHANT_NEW_ORDER.value,
+                                                channel=NotificationChannel.PUSH.value,
+                                                subject=f"New order paid — {o.order_number}",
+                                                body=(
+                                                    f"Order {o.order_number} has been paid "
+                                                    f"({o.total_amount} {o.currency}). Please fulfill."
+                                                ),
+                                                related_order_id=str(o.id),
+                                                related_payment_id=str(pt.id),
+                                            )
+                                        )
+                                except Exception:
+                                    pass
             except (ValueError, TypeError):
                 pass
 

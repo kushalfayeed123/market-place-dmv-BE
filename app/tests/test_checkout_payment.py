@@ -130,6 +130,23 @@ async def buyer_headers(buyer_token: str) -> dict:
     return {"Authorization": f"Bearer {buyer_token}"}
 
 
+@pytest.fixture(autouse=True)
+def _stub_provider_verification(monkeypatch: pytest.MonkeyPatch):
+    """These tests simulate a successful webhook without a real provider charge.
+
+    The webhook handler now confirms the transaction with the provider's
+    verification endpoint before releasing value, so stub that endpoint to
+    report success.  Individual tests can override this with their own
+    ``monkeypatch.setattr(PaystackProvider, "verify_transaction_details", ...)``
+    to simulate a dispute or a commission-inflated amount.
+    """
+
+    async def _verify_ok(self, provider_reference):
+        return PaymentVerificationResult(status="success", amount=10000, currency="NGN")
+
+    monkeypatch.setattr(PaystackProvider, "verify_transaction_details", _verify_ok)
+
+
 @pytest.mark.asyncio
 async def test_checkout_creates_order(
     client: AsyncClient, buyer_headers: dict, seed_data: dict
@@ -769,3 +786,180 @@ async def test_pay_on_delivery_rejected_for_digital_order(
     )
     assert pay_resp.status_code == 400, pay_resp.text
     assert "physical" in pay_resp.json()["detail"].lower()
+
+@pytest.mark.asyncio
+async def test_verify_accepts_provider_amount_including_commission(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict, monkeypatch: pytest.MonkeyPatch
+):
+    """The provider adds its commission/fees at the point of payment, so the
+    verified amount differs from the order total.  The verify endpoint must
+    accept the provider's actual paid amount instead of rejecting the mismatch."""
+
+    async def initialize(self, order_id, amount, currency, **kwargs):
+        return PaymentInitResult(
+            provider_reference="verify-commission-ref",
+            payment_url="https://pay.example/verify",
+        )
+
+    async def verify(self, provider_reference):
+        assert provider_reference == "verify-commission-ref"
+        # Order total is 10000; the provider actually charged 10500 (500 commission).
+        return PaymentVerificationResult(status="success", amount=10500, currency="NGN")
+
+    monkeypatch.setattr(PaystackProvider, "initialize_transaction", initialize)
+    monkeypatch.setattr(PaystackProvider, "verify_transaction_details", verify)
+
+    checkout = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": seed_data["variant_id"], "quantity": 1}], "fulfillment_option": "pickup"},
+        headers={**buyer_headers, "Idempotency-Key": "verify-commission-checkout"},
+    )
+    assert checkout.status_code == 201
+    order_id = checkout.json()["id"]
+
+    pay_resp = await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": order_id, "provider": "paystack"},
+        headers={**buyer_headers, "Idempotency-Key": "verify-commission-pay"},
+    )
+    assert pay_resp.status_code == 201
+
+    verified = await client.post(
+        f"/api/v1/payments/order/{order_id}/verify", headers=buyer_headers, json={}
+    )
+    assert verified.status_code == 200, verified.text
+    body = verified.json()
+    assert body["status"] == "success"
+    assert body["amount"] == 10500  # actual amount paid, taken from the provider
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_currency_mismatch(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict, monkeypatch: pytest.MonkeyPatch
+):
+    """A currency mismatch between provider and order is still rejected."""
+
+    async def initialize(self, order_id, amount, currency, **kwargs):
+        return PaymentInitResult(
+            provider_reference="verify-currency-ref",
+            payment_url="https://pay.example/verify",
+        )
+
+    async def verify(self, provider_reference):
+        return PaymentVerificationResult(status="success", amount=10000, currency="USD")
+
+    monkeypatch.setattr(PaystackProvider, "initialize_transaction", initialize)
+    monkeypatch.setattr(PaystackProvider, "verify_transaction_details", verify)
+
+    checkout = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": seed_data["variant_id"], "quantity": 1}], "fulfillment_option": "pickup"},
+        headers={**buyer_headers, "Idempotency-Key": "verify-currency-checkout"},
+    )
+    assert checkout.status_code == 201
+    order_id = checkout.json()["id"]
+    await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": order_id, "provider": "paystack"},
+        headers={**buyer_headers, "Idempotency-Key": "verify-currency-pay"},
+    )
+
+    verified = await client.post(
+        f"/api/v1/payments/order/{order_id}/verify", headers=buyer_headers, json={}
+    )
+    assert verified.status_code == 400
+    assert "currency" in verified.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_webhook_does_not_confirm_when_provider_disputes(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict, monkeypatch: pytest.MonkeyPatch
+):
+    """The webhook alone must not release value: if the provider's verification
+    endpoint says the transaction is not successful, the payment stays pending."""
+
+    async def initialize(self, order_id, amount, currency, **kwargs):
+        return PaymentInitResult(
+            provider_reference="wh-dispute-ref",
+            payment_url="https://pay.example/x",
+        )
+
+    async def verify(self, provider_reference):
+        assert provider_reference == "wh-dispute-ref"
+        return PaymentVerificationResult(status="failed", amount=10000, currency="NGN")
+
+    monkeypatch.setattr(PaystackProvider, "initialize_transaction", initialize)
+    monkeypatch.setattr(PaystackProvider, "verify_transaction_details", verify)
+
+    checkout = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": seed_data["variant_id"], "quantity": 1}], "fulfillment_option": "pickup"},
+        headers={**buyer_headers, "Idempotency-Key": "wh-dispute-checkout"},
+    )
+    assert checkout.status_code == 201
+    order_id = checkout.json()["id"]
+    pay_resp = await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": order_id, "provider": "paystack"},
+        headers={**buyer_headers, "Idempotency-Key": "wh-dispute-pay"},
+    )
+    assert pay_resp.status_code == 201
+
+    webhook_resp = await client.post(
+        "/api/v1/payments/webhooks/paystack",
+        json={"event": "charge.success", "data": {"id": "evt_dispute_1", "reference": "wh-dispute-ref"}},
+    )
+    assert webhook_resp.status_code == 200
+
+    pay_get = await client.get(f"/api/v1/payments/order/{order_id}", headers=buyer_headers)
+    assert pay_get.json()["status"] == "initialized"  # NOT success — provider disputed
+    order_get = await client.get(f"/api/v1/orders/{order_id}", headers=buyer_headers)
+    assert order_get.json()["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_webhook_records_actual_paid_amount_from_provider(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict, monkeypatch: pytest.MonkeyPatch
+):
+    """On provider-confirmed webhook success, the payment amount becomes the
+    actual amount paid (order total + provider commission) from the provider."""
+
+    async def initialize(self, order_id, amount, currency, **kwargs):
+        return PaymentInitResult(
+            provider_reference="wh-amount-ref",
+            payment_url="https://pay.example/x",
+        )
+
+    async def verify(self, provider_reference):
+        assert provider_reference == "wh-amount-ref"
+        # 10000 order + 500 provider commission
+        return PaymentVerificationResult(status="success", amount=10500, currency="NGN")
+
+    monkeypatch.setattr(PaystackProvider, "initialize_transaction", initialize)
+    monkeypatch.setattr(PaystackProvider, "verify_transaction_details", verify)
+
+    checkout = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": seed_data["variant_id"], "quantity": 1}], "fulfillment_option": "pickup"},
+        headers={**buyer_headers, "Idempotency-Key": "wh-amount-checkout"},
+    )
+    assert checkout.status_code == 201
+    order_id = checkout.json()["id"]
+    await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": order_id, "provider": "paystack"},
+        headers={**buyer_headers, "Idempotency-Key": "wh-amount-pay"},
+    )
+
+    webhook_resp = await client.post(
+        "/api/v1/payments/webhooks/paystack",
+        json={"event": "charge.success", "data": {"id": "evt_amount_1", "reference": "wh-amount-ref"}},
+    )
+    assert webhook_resp.status_code == 200
+
+    pay_get = await client.get(f"/api/v1/payments/order/{order_id}", headers=buyer_headers)
+    body = pay_get.json()
+    assert body["status"] == "success"
+    assert body["amount"] == 10500
+    order_get = await client.get(f"/api/v1/orders/{order_id}", headers=buyer_headers)
+    assert order_get.json()["status"] == "paid"
