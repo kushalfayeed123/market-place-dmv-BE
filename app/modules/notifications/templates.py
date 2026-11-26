@@ -47,6 +47,7 @@ subject, text, html = render_email(
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from html import escape
 from typing import Any
 
@@ -73,6 +74,30 @@ def _esc(value: Any) -> str:
     return escape(_fmt(value))
 
 
+def _format_minor_amount(value: Any, currency: Any) -> str:
+    """Format a minor-unit amount (e.g. kobo) as a major-unit amount."""
+    raw_amount = _fmt(value).strip()
+    if not raw_amount:
+        return ""
+
+    currency_code = _fmt(currency).upper()
+    if currency_code not in {"NGN", "GHS", "KES", "ZAR", "USD", "EUR", "GBP"}:
+        return raw_amount
+
+    try:
+        amount = Decimal(raw_amount)
+    except InvalidOperation:
+        return raw_amount
+    if not amount.is_finite():
+        return raw_amount
+
+    # Provider and order amounts are integer minor units. Preserve decimal
+    # values already supplied in display units for backwards compatibility.
+    if amount == amount.to_integral_value():
+        amount /= Decimal(100)
+    return f"{amount:,.2f}"
+
+
 def _base_url() -> str:
     """Return the canonical base URL for the app (frontend or public)."""
     return (settings.PUBLIC_BASE_URL or settings.FRONTEND_URL or "").rstrip("/")
@@ -88,6 +113,20 @@ def _order_url(ctx: dict[str, Any]) -> str:
     if base and order_ref:
         return f"{base}/orders/{order_ref}"
     return ""
+
+
+def _merchant_order_url(ctx: dict[str, Any]) -> str:
+    """Build a merchant-dashboard link for an order notification."""
+    action = _fmt(ctx.get("action_url"))
+    if action:
+        return action
+    base = _base_url()
+    if not base:
+        return ""
+    order_id = _fmt(ctx.get("related_order_id"))
+    if order_id:
+        return f"{base}/merchant/orders/{order_id}"
+    return f"{base}/merchant/dashboard?section=orders"
 
 
 def _fallback_html(subject: str, body: str) -> str:
@@ -246,8 +285,8 @@ def render_email(notification_type: str, context: dict[str, Any] | None = None) 
     # ── order_confirmation ──
     if t == "order_confirmation":
         onum = _fmt(ctx.get("order_number"))
-        total = _fmt(ctx.get("total"))
         currency = _fmt(ctx.get("currency"))
+        total = _format_minor_amount(ctx.get("total"), currency)
         items = _fmt(ctx.get("items_summary"))
         action_url = _order_url(ctx)
         action_label = _fmt(ctx.get("action_label"))
@@ -269,9 +308,9 @@ def render_email(notification_type: str, context: dict[str, Any] | None = None) 
     # ── merchant_new_order ──
     if t == "merchant_new_order":
         onum = _fmt(ctx.get("order_number"))
-        total = _fmt(ctx.get("total"))
         currency = _fmt(ctx.get("currency"))
-        action_url = _order_url(ctx)
+        total = _format_minor_amount(ctx.get("total"), currency)
+        action_url = _merchant_order_url(ctx)
         action_label = _fmt(ctx.get("action_label"))
         subject = f"New order {onum} received" if onum else _fmt(ctx.get("subject")) or f"{BRAND} notification"
         text = (
@@ -356,8 +395,8 @@ def render_email(notification_type: str, context: dict[str, Any] | None = None) 
     # ── refund_issued ──
     if t == "refund_issued":
         onum = _fmt(ctx.get("order_number"))
-        amount = _fmt(ctx.get("amount"))
         currency = _fmt(ctx.get("currency"))
+        amount = _format_minor_amount(ctx.get("amount"), currency)
         subject = (
             f"A refund of {amount} {currency} was issued for order {onum}"
             if onum and amount
@@ -377,8 +416,8 @@ def render_email(notification_type: str, context: dict[str, Any] | None = None) 
 
     # ── payout_released / payout_paid ──
     if t in ("payout_released", "payout_paid"):
-        amount = _fmt(ctx.get("amount"))
         currency = _fmt(ctx.get("currency"))
+        amount = _format_minor_amount(ctx.get("amount"), currency)
         bank = _fmt(ctx.get("bank"))
         status = _fmt(ctx.get("status", t.replace("_", " ").title()))
         subject = (

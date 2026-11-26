@@ -65,6 +65,42 @@ def test_cta_button_rendered_when_action_supplied():
     assert "https://app.example.com/orders/ORD-20260101-123456-abcd" in html
 
 
+def test_merchant_order_cta_links_to_dashboard_order_detail(monkeypatch):
+    from app.modules.notifications import templates
+
+    monkeypatch.setattr(templates.settings, "PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(templates.settings, "FRONTEND_URL", "https://shop.example.com")
+    _, _, html = render_email(
+        "merchant_new_order",
+        {
+            "order_number": "ORD-20260101-123456-abcd",
+            "related_order_id": "12345678-1234-1234-1234-123456789012",
+            "action_label": "View order",
+        },
+    )
+
+    assert (
+        "https://shop.example.com/merchant/orders/"
+        "12345678-1234-1234-1234-123456789012"
+    ) in html
+    assert "/orders/ORD-20260101-123456-abcd" not in html
+
+
+def test_order_email_formats_minor_units_as_major_currency():
+    _, text, html = render_email(
+        "order_confirmation",
+        {
+            "order_number": "ORD-20260101-123456-abcd",
+            "total": "3000000",
+            "currency": "NGN",
+            "items_summary": "1 item",
+        },
+    )
+
+    assert "30,000.00 NGN" in text
+    assert "30,000.00 NGN" in html
+
+
 def test_unknown_type_falls_back_to_branded_wrapper():
     subject, text, html = render_email(
         "some_custom_type", {"subject": "Hello", "body": "Plain body text"}
