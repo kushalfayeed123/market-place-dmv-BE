@@ -130,23 +130,6 @@ async def buyer_headers(buyer_token: str) -> dict:
     return {"Authorization": f"Bearer {buyer_token}"}
 
 
-@pytest.fixture(autouse=True)
-def _stub_provider_verification(monkeypatch: pytest.MonkeyPatch):
-    """These tests simulate a successful webhook without a real provider charge.
-
-    The webhook handler now confirms the transaction with the provider's
-    verification endpoint before releasing value, so stub that endpoint to
-    report success.  Individual tests can override this with their own
-    ``monkeypatch.setattr(PaystackProvider, "verify_transaction_details", ...)``
-    to simulate a dispute or a commission-inflated amount.
-    """
-
-    async def _verify_ok(self, provider_reference):
-        return PaymentVerificationResult(status="success", amount=10000, currency="NGN")
-
-    monkeypatch.setattr(PaystackProvider, "verify_transaction_details", _verify_ok)
-
-
 @pytest.mark.asyncio
 async def test_checkout_creates_order(
     client: AsyncClient, buyer_headers: dict, seed_data: dict

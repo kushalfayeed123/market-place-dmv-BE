@@ -26,24 +26,6 @@ from app.models.product import FulfillmentKind, Product, ProductStatus
 from app.models.product_variant import ProductVariant
 from app.models.store import Store
 from app.models.user import Gender, User, UserRole
-from app.modules.payments.providers.base import PaymentVerificationResult
-from app.modules.payments.providers.paystack import PaystackProvider
-
-
-@pytest.fixture(autouse=True)
-def _stub_provider_verification(monkeypatch: pytest.MonkeyPatch):
-    """These tests simulate a successful webhook without a real provider charge.
-
-    The webhook handler confirms the transaction with the provider's
-    verification endpoint before releasing value, so stub that endpoint to
-    report success (tests can override per-test to simulate a dispute).
-    """
-
-    async def _verify_ok(self, provider_reference):
-        return PaymentVerificationResult(status="success", amount=10000, currency="NGN")
-
-    monkeypatch.setattr(PaystackProvider, "verify_transaction_details", _verify_ok)
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
