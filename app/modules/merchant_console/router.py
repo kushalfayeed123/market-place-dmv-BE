@@ -34,7 +34,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_active_user, to_uuid
@@ -254,10 +254,18 @@ async def list_merchant_orders(
     merchant = await _require_merchant_access(merchant_id, current_user, db)
     mid = to_uuid(merchant.id)
 
-    q = (
-        select(Order, OrderItem)
-        .join(OrderItem, OrderItem.order_id == Order.id)
-        .where(OrderItem.merchant_id == mid)
+    q = select(Order).where(
+        or_(
+            select(OrderItem.id)
+            .where(OrderItem.order_id == Order.id, OrderItem.merchant_id == mid)
+            .exists(),
+            select(LedgerEntry.id)
+            .where(LedgerEntry.order_id == Order.id, LedgerEntry.merchant_id == mid)
+            .exists(),
+            select(Fulfillment.id)
+            .where(Fulfillment.order_id == Order.id, Fulfillment.merchant_id == mid)
+            .exists(),
+        )
     )
     if status:
         q = q.where(Order.status == status)
@@ -265,9 +273,9 @@ async def list_merchant_orders(
         q = q.where(Order.order_number.ilike(f"%{search}%"))
     q = q.distinct().order_by(Order.created_at.desc()).limit(limit)
     result = await db.execute(q)
-    rows = result.all()
+    rows = result.scalars().all()
 
-    buyer_ids = [r.Order.buyer_id for r in rows]
+    buyer_ids = [r.buyer_id for r in rows]
     user_map: dict[str, str] = {}
     phone_map: dict[str, str | None] = {}
     if buyer_ids:
@@ -285,15 +293,15 @@ async def list_merchant_orders(
 
     return [
         MerchantOrderListItem(
-            id=str(r.Order.id),
-            number=r.Order.order_number,
-            customer_name=user_map.get(str(r.Order.buyer_id), ""),
+            id=str(r.id),
+            number=r.order_number,
+            customer_name=user_map.get(str(r.buyer_id), ""),
             # Prefer the phone captured at checkout; fall back to profile phone.
-            customer_phone=r.Order.buyer_phone or phone_map.get(str(r.Order.buyer_id)),
-            created_at=r.Order.created_at,
-            total=r.Order.total_amount,
-            currency=r.Order.currency,
-            status=r.Order.status,
+            customer_phone=r.buyer_phone or phone_map.get(str(r.buyer_id)),
+            created_at=r.created_at,
+            total=r.total_amount,
+            currency=r.currency,
+            status=r.status,
         )
         for r in rows
     ]
@@ -329,10 +337,19 @@ async def get_merchant_order_detail(
     # Non-admin merchants may only read orders they have items in.
     if not is_admin:
         owned = await db.scalar(
-            select(func.count())
-            .select_from(OrderItem)
-            .where(OrderItem.order_id == order.id)
-            .where(OrderItem.merchant_id == mid)
+            select(
+                or_(
+                    select(OrderItem.id)
+                    .where(OrderItem.order_id == order.id, OrderItem.merchant_id == mid)
+                    .exists(),
+                    select(LedgerEntry.id)
+                    .where(LedgerEntry.order_id == order.id, LedgerEntry.merchant_id == mid)
+                    .exists(),
+                    select(Fulfillment.id)
+                    .where(Fulfillment.order_id == order.id, Fulfillment.merchant_id == mid)
+                    .exists(),
+                )
+            )
         )
         if not owned:
             raise HTTPException(
@@ -512,6 +529,7 @@ async def list_merchant_products(
     q = (
         select(Product)
         .where(Product.merchant_id == mid)
+        .where(Product.status != ProductStatus.DELETED.value)
         .order_by(Product.created_at.desc())
         .limit(limit)
     )
@@ -1089,7 +1107,17 @@ async def delete_product(
     owned = await _get_owned_merchant_ids(current_user, db)
     if product.merchant_id not in owned:
         raise HTTPException(status_code=403, detail="Not authorized")
-    await db.delete(product)
+    has_order_history = await db.scalar(
+        select(func.count())
+        .select_from(OrderItem)
+        .where(OrderItem.product_id == product.id)
+    )
+    if has_order_history:
+        # Keep the product row (and its order-item references) as a historical
+        # record; deleting it would cascade-delete the merchant's order items.
+        product.status = ProductStatus.DELETED.value
+    else:
+        await db.delete(product)
     await db.commit()
     return {"ok": True, "product_id": product_id}
 

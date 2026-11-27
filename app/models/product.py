@@ -31,6 +31,7 @@ class ProductStatus(str, PyEnum):
     DRAFT = "draft"
     ACTIVE = "active"
     SUSPENDED = "suspended"
+    DELETED = "deleted"
 
 
 # Allowed product type values. A product can belong to multiple types (e.g. a

@@ -18,7 +18,7 @@ from app.models.notification import NotificationChannel, NotificationType
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.payment_transaction import PaymentTransaction
-from app.models.product import Product, product_product_types
+from app.models.product import Product, ProductStatus, product_product_types
 from app.models.product_variant import ProductVariant
 from app.models.user import User
 
@@ -124,6 +124,8 @@ class OrderServiceImpl(OrderService):
 
             if not product:
                 raise ValueError(f"Product for variant {cart_item.variant_id} not found")
+            if product.status == ProductStatus.DELETED.value:
+                raise ValueError(f"Product for variant {cart_item.variant_id} is no longer available")
 
             cart_types.add(product.fulfillment_type)
             product_types_result = await self._db.execute(

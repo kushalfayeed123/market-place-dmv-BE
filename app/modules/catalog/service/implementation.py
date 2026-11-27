@@ -352,7 +352,10 @@ class CatalogServiceImpl(CatalogService):
             return None
 
         result = await self._db.execute(
-            select(Product).where(Product.id == product_uuid)
+            select(Product).where(
+                Product.id == product_uuid,
+                Product.status != ProductStatus.DELETED.value,
+            )
         )
         product = result.scalar_one_or_none()
 
@@ -407,7 +410,11 @@ class CatalogServiceImpl(CatalogService):
         Returns:
             List of product responses.
         """
-        query = select(Product, Store.name.label("store_name")).join(Store, Product.store_id == Store.id)
+        query = (
+            select(Product, Store.name.label("store_name"))
+            .join(Store, Product.store_id == Store.id)
+            .where(Product.status != ProductStatus.DELETED.value)
+        )
 
         if merchant_id:
             try:
@@ -968,7 +975,10 @@ class CatalogServiceImpl(CatalogService):
 
         # Then fetch the product and all its variants
         product_result = await self._db.execute(
-            select(Product).where(Product.id == variant.product_id)
+            select(Product).where(
+                Product.id == variant.product_id,
+                Product.status != ProductStatus.DELETED.value,
+            )
         )
         product = product_result.scalar_one_or_none()
         if product is None:

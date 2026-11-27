@@ -110,6 +110,7 @@ async def merchant_setup(db) -> dict:
 
     return {
         "merchant_id": str(merchant.id),
+        "product_id": str(product.id),
         "owner_id": str(owner.id),
         "owner_email": owner.email,
         "owner_password": "MerchantPass123!",
@@ -260,6 +261,140 @@ async def test_merchant_list_orders_paid(
     assert order["currency"] == "NGN"
     assert order["total"] == 10000
     assert order["customer_name"]  # non-empty
+
+
+@pytest.mark.asyncio
+async def test_deleting_ordered_product_preserves_merchant_order(
+    client: AsyncClient,
+    merchant_owner_token: str,
+    merchant_setup: dict,
+    db,
+):
+    headers = {"Authorization": f"Bearer {merchant_owner_token}"}
+    buyer = (
+        await db.execute(
+            select(User).where(User.email == merchant_setup["buyer_email"])
+        )
+    ).scalar_one()
+    order = Order(
+        buyer_id=buyer.id,
+        order_number=f"ORD-DELETE-{uuid4().hex[:8]}",
+        status=OrderStatus.PAID.value,
+        currency="NGN",
+        total_amount=10000,
+    )
+    db.add(order)
+    await db.flush()
+    db.add(
+        OrderItem(
+            order_id=order.id,
+            merchant_id=to_uuid(merchant_setup["merchant_id"]),
+            product_id=to_uuid(merchant_setup["product_id"]),
+            variant_id=to_uuid(merchant_setup["variant_id"]),
+            quantity=1,
+            unit_price=10000,
+            currency="NGN",
+            line_total=10000,
+        )
+    )
+    await db.commit()
+
+    deleted = await client.delete(
+        f"/api/v1/products/{merchant_setup['product_id']}",
+        headers=headers,
+    )
+    assert deleted.status_code == 200, deleted.text
+
+    orders = await client.get(
+        f"/api/v1/merchants/{merchant_setup['merchant_id']}/orders",
+        headers=headers,
+    )
+    assert orders.status_code == 200, orders.text
+    assert [listed["id"] for listed in orders.json()] == [str(order.id)]
+
+    detail = await client.get(
+        f"/api/v1/merchants/{merchant_setup['merchant_id']}/orders/{order.id}",
+        headers=headers,
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["items"][0]["product_title"] == "Test Product MC"
+
+    products = await client.get(
+        f"/api/v1/merchants/{merchant_setup['merchant_id']}/products",
+        headers=headers,
+    )
+    assert products.status_code == 200, products.text
+    assert all(product["id"] != merchant_setup["product_id"] for product in products.json())
+
+
+@pytest.mark.asyncio
+async def test_merchant_can_still_find_order_after_legacy_item_cascade(
+    client: AsyncClient,
+    merchant_owner_token: str,
+    merchant_setup: dict,
+    db,
+):
+    headers = {"Authorization": f"Bearer {merchant_owner_token}"}
+    buyer = (
+        await db.execute(
+            select(User).where(User.email == merchant_setup["buyer_email"])
+        )
+    ).scalar_one()
+    order = Order(
+        buyer_id=buyer.id,
+        order_number=f"ORD-LEGACY-{uuid4().hex[:8]}",
+        status=OrderStatus.FULFILLED.value,
+        currency="NGN",
+        total_amount=10000,
+    )
+    db.add(order)
+    await db.flush()
+    order_item = OrderItem(
+        order_id=order.id,
+        merchant_id=to_uuid(merchant_setup["merchant_id"]),
+        product_id=to_uuid(merchant_setup["product_id"]),
+        variant_id=to_uuid(merchant_setup["variant_id"]),
+        quantity=1,
+        unit_price=10000,
+        currency="NGN",
+        line_total=10000,
+    )
+    db.add(order_item)
+    db.add(
+        LedgerEntry(
+            entry_group_id=uuid4(),
+            account_type="merchant_wallet",
+            merchant_id=to_uuid(merchant_setup["merchant_id"]),
+            direction=LedgerDirection.CREDIT.value,
+            entry_type=LedgerEntryType.PAYOUT_HOLD.value,
+            amount=9000,
+            currency="NGN",
+            order_id=order.id,
+        )
+    )
+    await db.commit()
+    await db.delete(order_item)
+    await db.commit()
+
+    deleted = await client.delete(
+        f"/api/v1/products/{merchant_setup['product_id']}",
+        headers=headers,
+    )
+    assert deleted.status_code == 200, deleted.text
+
+    orders = await client.get(
+        f"/api/v1/merchants/{merchant_setup['merchant_id']}/orders",
+        headers=headers,
+    )
+    assert orders.status_code == 200, orders.text
+    assert [listed["id"] for listed in orders.json()] == [str(order.id)]
+
+    detail = await client.get(
+        f"/api/v1/merchants/{merchant_setup['merchant_id']}/orders/{order.id}",
+        headers=headers,
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["items"] == []
 
 
 @pytest.mark.asyncio
