@@ -26,7 +26,6 @@ from app.models.user import Gender, User, UserRole
 from app.modules.payments.providers.base import (
     PaymentInitResult,
     PaymentVerificationResult,
-    SplitResult,
 )
 from app.modules.payments.providers.paystack import PaystackProvider
 from httpx import AsyncClient
@@ -642,7 +641,7 @@ async def test_get_payment_methods_lists_providers(
 
 
 @pytest.mark.asyncio
-async def test_single_merchant_paystack_checkout_uses_matching_subaccount_split(
+async def test_single_merchant_paystack_checkout_uses_direct_subaccount_settlement(
     client: AsyncClient,
     buyer_headers: dict,
     seed_data: dict,
@@ -662,14 +661,14 @@ async def test_single_merchant_paystack_checkout_uses_matching_subaccount_split(
     captured: dict = {}
 
     async def create_split(self, name, legs, currency):
-        captured["legs"] = legs
-        captured["currency"] = currency
-        return SplitResult(split_code="SPL_test_order", provider="paystack")
+        pytest.fail("Single-merchant orders must not create a dynamic flat split")
 
     async def initialize(self, order_id, amount, currency, **kwargs):
         captured["split_code"] = kwargs.get("split_code")
+        captured["subaccount"] = kwargs.get("subaccount")
+        captured["transaction_charge"] = kwargs.get("transaction_charge")
         return PaymentInitResult(
-            provider_reference="paystack-split-test",
+            provider_reference="paystack-direct-subaccount-test",
             payment_url="https://pay.example/checkout",
         )
 
@@ -693,12 +692,61 @@ async def test_single_merchant_paystack_checkout_uses_matching_subaccount_split(
     )
 
     assert payment.status_code == 201, payment.text
-    assert captured["split_code"] == "SPL_test_order"
-    assert captured["currency"] == "NGN"
-    merchant_legs = [leg for leg in captured["legs"] if leg.subaccount]
-    assert len(merchant_legs) == 1
-    assert merchant_legs[0].subaccount == "ACCT_test_merchant"
-    assert merchant_legs[0].amount == 9000
+    assert captured["split_code"] is None
+    assert captured["subaccount"] == "ACCT_test_merchant"
+    assert captured["transaction_charge"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_paystack_initialize_sends_direct_subaccount_and_commission(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": True,
+                "data": {
+                    "reference": "paystack-direct-ref",
+                    "authorization_url": "https://pay.example/checkout",
+                },
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, json, headers):
+            captured["body"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(PaystackProvider, "_configured", True)
+    monkeypatch.setattr(
+        "app.modules.payments.providers.paystack.httpx.AsyncClient", FakeClient
+    )
+
+    await PaystackProvider().initialize_transaction(
+        order_id=str(uuid.uuid4()),
+        amount=10153,
+        currency="NGN",
+        buyer_email="buyer@example.com",
+        subaccount="ACCT_test_merchant",
+        transaction_charge=1000,
+    )
+
+    assert captured["body"]["subaccount"] == "ACCT_test_merchant"
+    assert captured["body"]["transaction_charge"] == 1000
+    assert "split_code" not in captured["body"]
 
 
 @pytest.mark.asyncio

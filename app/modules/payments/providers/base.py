@@ -115,12 +115,16 @@ class PaymentProvider(abc.ABC):
         callback_url: str | None = None,
         metadata: dict | None = None,
         split_code: str | None = None,
+        subaccount: str | None = None,
+        transaction_charge: int | None = None,
     ) -> PaymentInitResult:
         """Create a payment session / transaction with the provider.
 
         ``split_code`` (when the provider supports transaction splits) fans a
         single buyer transaction out to N merchant subaccounts + the platform
-        leg at settlement time — this is how multi-merchant orders settle.
+        leg at settlement time. ``subaccount`` and ``transaction_charge``
+        support direct settlement to one merchant subaccount, with the
+        transaction charge retained by the platform; amounts are in minor units.
 
         Returns a :class:`PaymentInitResult` with the provider reference and
         (optionally) a URL the buyer is redirected to.

@@ -64,13 +64,16 @@ class PaystackProvider(PaymentProvider):
         callback_url: str | None = None,
         metadata: dict | None = None,
         split_code: str | None = None,
+        subaccount: str | None = None,
+        transaction_charge: int | None = None,
     ) -> PaymentInitResult:
         """Initialise a Paystack transaction.
 
         When credentials are not configured (dev / test), falls back to a
         local stub that generates a reference and a mock authorization URL.
-        ``split_code`` attaches a pre-created Transaction Split so the single
-        buyer payment fans out to merchant subaccounts at settlement.
+        ``split_code`` attaches a pre-created Transaction Split. ``subaccount``
+        and ``transaction_charge`` route a single-merchant payment directly to
+        its subaccount while retaining the platform commission.
         """
         # Paystack's initialize endpoint REQUIRES a real customer email —
         # never fall back to a placeholder address on the live path.
@@ -93,6 +96,12 @@ class PaystackProvider(PaymentProvider):
         }
         if split_code:
             body["split_code"] = split_code
+        if subaccount:
+            body["subaccount"] = subaccount
+        if transaction_charge is not None:
+            if transaction_charge < 0:
+                raise ValueError("transaction_charge cannot be negative")
+            body["transaction_charge"] = transaction_charge
         if metadata:
             body["metadata"] = metadata
 

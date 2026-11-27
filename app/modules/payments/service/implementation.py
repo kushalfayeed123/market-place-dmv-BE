@@ -104,6 +104,7 @@ class PaymentServiceImpl(PaymentService):
             )
             existing_payment = existing_result.scalar_one_or_none()
             existing_split_code = None
+            existing_subaccount = None
             if (
                 existing_payment is not None
                 and existing_payment.provider == provider_key
@@ -115,9 +116,12 @@ class PaymentServiceImpl(PaymentService):
                     existing_payload = {}
                 if isinstance(existing_payload, dict):
                     existing_split_code = existing_payload.get("split_code")
+                    existing_subaccount = existing_payload.get("subaccount")
 
             if existing_payment is not None and (
-                existing_payment.status == "success" or existing_split_code
+                existing_payment.status == "success"
+                or existing_split_code
+                or existing_subaccount
             ):
                 return PaymentResponse(
                     id=str(existing_payment.id),
@@ -202,11 +206,13 @@ class PaymentServiceImpl(PaymentService):
         if provider is None:
             raise ValueError(f"Unknown payment provider '{provider_key}'")
 
-        # ── Merchant settlement split ─────────────────────────────────────
-        # Every merchant's net share must be routed to its provider subaccount,
-        # including single-merchant orders. Do not initialize an online
-        # transaction without the split needed for merchant settlement.
-        split_code = await _create_order_split(self._db, order, provider)
+        # ── Merchant settlement routing ───────────────────────────────────
+        # Paystack dynamic flat splits reject subaccount shares below NGN 100.
+        # A direct subaccount transaction supports smaller single-merchant
+        # orders, while multi-merchant orders continue to use a transaction split.
+        split_code, subaccount, transaction_charge = await _create_order_split(
+            self._db, order, provider
+        )
 
         # Resolve the buyer's real email — Paystack requires a customer email
         # on transaction initialize; it must never be a placeholder.
@@ -227,11 +233,20 @@ class PaymentServiceImpl(PaymentService):
             buyer_email=buyer_email,
             metadata={"order_number": order.order_number},
             split_code=split_code,
+            subaccount=subaccount,
+            transaction_charge=transaction_charge,
         )
 
         # Create payment transaction with the provider's reference
         # The webhook (not this endpoint) will update it to "success"
-        raw_payload = json.dumps({"split_code": split_code}) if split_code else None
+        settlement_payload = {}
+        if split_code:
+            settlement_payload["split_code"] = split_code
+        if subaccount:
+            settlement_payload["subaccount"] = subaccount
+        if transaction_charge is not None:
+            settlement_payload["transaction_charge"] = transaction_charge
+        raw_payload = json.dumps(settlement_payload) if settlement_payload else None
         payment_transaction = PaymentTransaction(
             order_id=order.id,
             provider=payment_data.provider,
@@ -933,11 +948,14 @@ async def _merchant_legs_for_order(db, order, provider_key: str) -> list[tuple]:
     return legs
 
 
-async def _create_order_split(db, order, provider) -> str | None:
-    """Build a provider transaction split for every merchant in an order.
+async def _create_order_split(
+    db, order, provider
+) -> tuple[str | None, str | None, int | None]:
+    """Build merchant settlement instructions for an order.
 
-    Each merchant gets a leg of ``gross - commission``; the platform keeps the
-    summed commission as the remainder in the platform account.
+    Single-merchant orders use the provider's direct subaccount settlement
+    fields; multi-merchant orders use a transaction split. Merchant payouts
+    are ``gross - commission`` and the platform retains the commission.
     """
     provider_key = getattr(provider, "provider_key", "")
     if not provider_key or not hasattr(provider, "create_split"):
@@ -946,6 +964,17 @@ async def _create_order_split(db, order, provider) -> str | None:
     legs_data = await _merchant_legs_for_order(db, order, provider_key)
     if not legs_data:
         raise ValueError("Cannot create payment split for an order without merchant items")
+
+    if len(legs_data) == 1:
+        _, subaccount_code, gross, plan = legs_data[0]
+        commission = compute_commission(gross, plan)
+        if commission < 0 or commission >= gross:
+            merchant = legs_data[0][0]
+            raise ValueError(
+                f"Invalid commission for merchant '{merchant.business_name}': "
+                "the merchant settlement share must be greater than zero."
+            )
+        return None, subaccount_code, commission
 
     split_legs: list[SplitLeg] = []
     total_commission = 0
@@ -976,8 +1005,6 @@ async def _create_order_split(db, order, provider) -> str | None:
                 label="platform_commission",
             )
         )
-    if not split_legs:
-        return None
     result = await provider.create_split(
         name=f"order_{order.order_number}", legs=split_legs, currency=order.currency
     )
@@ -986,7 +1013,7 @@ async def _create_order_split(db, order, provider) -> str | None:
             f"{provider_key} did not return a transaction split code for "
             f"order {order.order_number}."
         )
-    return result.split_code
+    return result.split_code, None, None
 
 
 async def post_order_ledger_entries(db, order, payment_transaction, created_by: str) -> None:
