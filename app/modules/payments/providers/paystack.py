@@ -424,7 +424,7 @@ class PaystackProvider(PaymentProvider):
 
         body: dict = {
             "name": name[:100],
-            "type": "percentage" if False else "flat",  # flat amounts per leg
+            "type": "flat",
             "currency": currency,
             "subaccounts": subaccounts,
             "bearer_type": "account",  # platform absorbs transaction fees
@@ -440,17 +440,20 @@ class PaystackProvider(PaymentProvider):
                 )
                 data = resp.json()
             if resp.status_code not in (200, 201) or not data.get("status", False):
-                return SplitResult(
-                    split_code=f"SPL_stub_{uuid.uuid4().hex[:16]}", provider=self.provider_key
+                raise RuntimeError(
+                    f"Paystack split creation failed: "
+                    f"{data.get('message', 'unknown error')}"
                 )
-            return SplitResult(
-                split_code=data.get("data", {}).get("split_code", ""),
-                provider=self.provider_key,
-            )
-        except Exception:
-            return SplitResult(
-                split_code=f"SPL_stub_{uuid.uuid4().hex[:16]}", provider=self.provider_key
-            )
+            split_code = data.get("data", {}).get("split_code")
+            if not split_code:
+                raise RuntimeError(
+                    "Paystack split creation succeeded without returning a split code"
+                )
+            return SplitResult(split_code=split_code, provider=self.provider_key)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Paystack split request failed: {exc}") from exc
 
     async def initiate_refund(
         self, provider_reference: str, amount: int | None = None

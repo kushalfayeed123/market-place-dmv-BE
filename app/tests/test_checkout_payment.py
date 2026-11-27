@@ -17,12 +17,17 @@ from app.models.category import Category
 from app.models.commission_plan import CommissionPlan
 from app.models.enums import InventoryPolicy
 from app.models.merchant import KycStatus, Merchant
+from app.models.merchant_payout_account import MerchantPayoutAccount
 from app.models.product import FulfillmentKind, Product, ProductStatus
 from app.models.product_variant import ProductVariant
 from app.models.payment_transaction import PaymentTransaction
 from app.models.store import Store
 from app.models.user import Gender, User, UserRole
-from app.modules.payments.providers.base import PaymentInitResult, PaymentVerificationResult
+from app.modules.payments.providers.base import (
+    PaymentInitResult,
+    PaymentVerificationResult,
+    SplitResult,
+)
 from app.modules.payments.providers.paystack import PaystackProvider
 from httpx import AsyncClient
 
@@ -634,6 +639,98 @@ async def test_get_payment_methods_lists_providers(
     assert paystack["implemented"] is True
     flutterwave = next(m for m in methods if m["key"] == "flutterwave")
     assert flutterwave["implemented"] is False
+
+
+@pytest.mark.asyncio
+async def test_single_merchant_paystack_checkout_uses_matching_subaccount_split(
+    client: AsyncClient,
+    buyer_headers: dict,
+    seed_data: dict,
+    db,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db.add(
+        MerchantPayoutAccount(
+            merchant_id=uuid.UUID(seed_data["merchant_id"]),
+            provider="paystack",
+            currency="NGN",
+            external_ref="ACCT_test_merchant",
+            is_active=True,
+        )
+    )
+    await db.commit()
+    captured: dict = {}
+
+    async def create_split(self, name, legs, currency):
+        captured["legs"] = legs
+        captured["currency"] = currency
+        return SplitResult(split_code="SPL_test_order", provider="paystack")
+
+    async def initialize(self, order_id, amount, currency, **kwargs):
+        captured["split_code"] = kwargs.get("split_code")
+        return PaymentInitResult(
+            provider_reference="paystack-split-test",
+            payment_url="https://pay.example/checkout",
+        )
+
+    monkeypatch.setattr(PaystackProvider, "create_split", create_split)
+    monkeypatch.setattr(PaystackProvider, "initialize_transaction", initialize)
+
+    checkout = await client.post(
+        "/api/v1/orders/checkout",
+        json={
+            "items": [{"variant_id": seed_data["variant_id"], "quantity": 1}],
+            "fulfillment_option": "pickup",
+        },
+        headers={**buyer_headers, "Idempotency-Key": "single-merchant-split-checkout"},
+    )
+    assert checkout.status_code == 201, checkout.text
+
+    payment = await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": checkout.json()["id"], "provider": "paystack"},
+        headers={**buyer_headers, "Idempotency-Key": "single-merchant-split-payment"},
+    )
+
+    assert payment.status_code == 201, payment.text
+    assert captured["split_code"] == "SPL_test_order"
+    assert captured["currency"] == "NGN"
+    merchant_legs = [leg for leg in captured["legs"] if leg.subaccount]
+    assert len(merchant_legs) == 1
+    assert merchant_legs[0].subaccount == "ACCT_test_merchant"
+    assert merchant_legs[0].amount == 9000
+
+
+@pytest.mark.asyncio
+async def test_online_payment_requires_matching_merchant_subaccount(
+    client: AsyncClient,
+    buyer_headers: dict,
+    seed_data: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def initialize(self, order_id, amount, currency, **kwargs):
+        pytest.fail("Payment initialization must not run without a matching subaccount")
+
+    monkeypatch.setattr(PaystackProvider, "initialize_transaction", initialize)
+    checkout = await client.post(
+        "/api/v1/orders/checkout",
+        json={
+            "items": [{"variant_id": seed_data["variant_id"], "quantity": 1}],
+            "fulfillment_option": "pickup",
+        },
+        headers={**buyer_headers, "Idempotency-Key": "missing-subaccount-checkout"},
+    )
+    assert checkout.status_code == 201, checkout.text
+
+    payment = await client.post(
+        "/api/v1/payments/process",
+        json={"order_id": checkout.json()["id"], "provider": "paystack"},
+        headers={**buyer_headers, "Idempotency-Key": "missing-subaccount-payment"},
+    )
+
+    assert payment.status_code == 400
+    assert "must configure an active paystack payout account in NGN" in payment.json()["detail"]
+
 
 @pytest.mark.asyncio
 async def test_pay_on_delivery_marks_order_awaiting_approval(

@@ -103,7 +103,22 @@ class PaymentServiceImpl(PaymentService):
                 .limit(1)
             )
             existing_payment = existing_result.scalar_one_or_none()
-            if existing_payment is not None:
+            existing_split_code = None
+            if (
+                existing_payment is not None
+                and existing_payment.provider == provider_key
+                and existing_payment.raw_payload
+            ):
+                try:
+                    existing_payload = json.loads(existing_payment.raw_payload)
+                except (json.JSONDecodeError, TypeError):
+                    existing_payload = {}
+                if isinstance(existing_payload, dict):
+                    existing_split_code = existing_payload.get("split_code")
+
+            if existing_payment is not None and (
+                existing_payment.status == "success" or existing_split_code
+            ):
                 return PaymentResponse(
                     id=str(existing_payment.id),
                     order_id=str(existing_payment.order_id),
@@ -187,11 +202,10 @@ class PaymentServiceImpl(PaymentService):
         if provider is None:
             raise ValueError(f"Unknown payment provider '{provider_key}'")
 
-        # ── Multi-vendor split ─────────────────────────────────────────────
-        # One buyer transaction fans out to one leg per merchant (net of that
-        # merchant's commission) plus a platform leg that collects the
-        # commission. Falls back to a plain transaction for single-merchant
-        # orders or when the merchant has no provider subaccount.
+        # ── Merchant settlement split ─────────────────────────────────────
+        # Every merchant's net share must be routed to its provider subaccount,
+        # including single-merchant orders. Do not initialize an online
+        # transaction without the split needed for merchant settlement.
         split_code = await _create_order_split(self._db, order, provider)
 
         # Resolve the buyer's real email — Paystack requires a customer email
@@ -859,7 +873,7 @@ def compute_commission(line_total: int, plan: CommissionPlan | None) -> int:
     return pct + (plan.flat_fee_minor or 0)
 
 
-async def _merchant_legs_for_order(db, order) -> list[tuple]:
+async def _merchant_legs_for_order(db, order, provider_key: str) -> list[tuple]:
     """Group an order's items by merchant.
 
     Returns a list of ``(merchant, subaccount_code, gross_total, plan)`` tuples.
@@ -887,50 +901,73 @@ async def _merchant_legs_for_order(db, order) -> list[tuple]:
                 select(CommissionPlan).where(CommissionPlan.id == merchant.commission_plan_id)
             )
         ).scalar_one_or_none()
-        account = (
+        accounts = (
             await db.execute(
                 select(MerchantPayoutAccount).where(
                     MerchantPayoutAccount.merchant_id == merchant_id,
+                    MerchantPayoutAccount.provider == provider_key,
+                    MerchantPayoutAccount.currency == order.currency,
                     MerchantPayoutAccount.is_active.is_(True),
                 )
             )
-        ).scalar_one_or_none()
-        subaccount_code = account.external_ref if account else None
+        ).scalars().all()
+        if not accounts:
+            raise ValueError(
+                f"Merchant '{merchant.business_name}' must configure an active "
+                f"{provider_key} payout account in {order.currency} before this "
+                "order can be paid online."
+            )
+        if len(accounts) > 1:
+            raise ValueError(
+                f"Merchant '{merchant.business_name}' has multiple active "
+                f"{provider_key} payout accounts in {order.currency}."
+            )
+        subaccount_code = (accounts[0].external_ref or "").strip()
+        if not subaccount_code:
+            raise ValueError(
+                f"Merchant '{merchant.business_name}' has no {provider_key} subaccount "
+                f"code configured for {order.currency}."
+            )
         gross = sum(abs(i.line_total) for i in merchant_items)
         legs.append((merchant, subaccount_code, gross, plan))
     return legs
 
 
 async def _create_order_split(db, order, provider) -> str | None:
-    """Build a provider transaction split for a multi-merchant order.
+    """Build a provider transaction split for every merchant in an order.
 
     Each merchant gets a leg of ``gross - commission``; the platform keeps the
-    summed commission as its own leg. Single-merchant orders (or merchants
-    without a subaccount) skip the split and settle via the ledger only.
+    summed commission as the remainder in the platform account.
     """
-    legs_data = await _merchant_legs_for_order(db, order)
-    if len(legs_data) < 2:
-        return None
-    if not hasattr(provider, "create_split"):
-        return None
+    provider_key = getattr(provider, "provider_key", "")
+    if not provider_key or not hasattr(provider, "create_split"):
+        raise ValueError("Selected payment provider does not support merchant settlement splits")
+
+    legs_data = await _merchant_legs_for_order(db, order, provider_key)
+    if not legs_data:
+        raise ValueError("Cannot create payment split for an order without merchant items")
 
     split_legs: list[SplitLeg] = []
     total_commission = 0
     for merchant, subaccount_code, gross, plan in legs_data:
         commission = compute_commission(gross, plan)
+        if commission < 0 or commission >= gross:
+            raise ValueError(
+                f"Invalid commission for merchant '{merchant.business_name}': "
+                "the merchant settlement share must be greater than zero."
+            )
         total_commission += commission
         net = gross - commission
-        if subaccount_code and net > 0:
-            split_legs.append(
-                SplitLeg(
-                    subaccount=subaccount_code,
-                    amount=net,
-                    currency=order.currency,
-                    label=merchant.business_name,
-                )
+        split_legs.append(
+            SplitLeg(
+                subaccount=subaccount_code,
+                amount=net,
+                currency=order.currency,
+                label=merchant.business_name,
             )
+        )
     if total_commission > 0:
-        # Platform leg — no subaccount, the provider's own account collects it.
+        # Paystack retains the unassigned remainder in the platform account.
         split_legs.append(
             SplitLeg(
                 subaccount=None,
@@ -944,7 +981,12 @@ async def _create_order_split(db, order, provider) -> str | None:
     result = await provider.create_split(
         name=f"order_{order.order_number}", legs=split_legs, currency=order.currency
     )
-    return result.split_code if result else None
+    if result is None or not result.split_code:
+        raise RuntimeError(
+            f"{provider_key} did not return a transaction split code for "
+            f"order {order.order_number}."
+        )
+    return result.split_code
 
 
 async def post_order_ledger_entries(db, order, payment_transaction, created_by: str) -> None:
