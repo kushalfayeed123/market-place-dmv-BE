@@ -35,7 +35,7 @@ class ProductCreate(BaseModel):
     description: str | None = None
     fulfillment_type: str = Field(default="physical", pattern="^(physical|digital|service)$")
     status: str | None = Field(None, pattern="^(draft|active|suspended)$")
-    base_price_amount: int = Field(..., ge=0)  # Minor units
+    base_price_amount: int = Field(..., gt=0)  # Minor units
     base_price_currency: str = Field(default="NGN", min_length=3, max_length=3)
     attributes: dict[str, Any] | None = {}
     urls: list[str] | None = None
@@ -95,7 +95,7 @@ class ProductResponse(BaseModel):
 class ProductVariantCreate(BaseModel):
     sku: str = Field(..., min_length=1)
     attributes: dict[str, Any] | None = {}
-    price_override_amount: int | None = None
+    price_override_amount: int | None = Field(None, gt=0)
     price_override_currency: str | None = Field(None, min_length=3, max_length=3)
     inventory_policy: str | None = Field(None, pattern="^(tracked|untracked|unlimited)$")
     quantity_available: int | None = Field(None, ge=0)
@@ -107,7 +107,7 @@ class ProductVariantUpdate(BaseModel):
 
     sku: str | None = Field(None, min_length=1)
     attributes: dict[str, Any] | None = None
-    price_override_amount: int | None = Field(None, ge=0)
+    price_override_amount: int | None = Field(None, gt=0)
     price_override_currency: str | None = Field(None, min_length=3, max_length=3)
     inventory_policy: str | None = Field(None, pattern="^(tracked|untracked|unlimited)$")
     quantity_available: int | None = Field(None, ge=0)
@@ -162,7 +162,7 @@ class ProductUpdate(BaseModel):
     # and syncs ``fulfillment_type`` to the first type.
     product_types: list[str] | None = None
     status: str | None = Field(None, pattern=r"^(draft|active|suspended)$")
-    base_price_amount: int | None = Field(None, ge=0)
+    base_price_amount: int | None = Field(None, gt=0)
     base_price_currency: str | None = Field(None, min_length=3, max_length=3)
     attributes: dict[str, Any] | None = None
     urls: list[str] | None = None

@@ -188,6 +188,24 @@ async def test_checkout_creates_order(
 
 
 @pytest.mark.asyncio
+async def test_checkout_rejects_zero_variant_override(
+    client: AsyncClient, buyer_headers: dict, seed_data: dict, db
+):
+    variant = await db.get(ProductVariant, uuid.UUID(seed_data["variant_id"]))
+    variant.price_override_amount = 0
+    await db.commit()
+
+    response = await client.post(
+        "/api/v1/orders/checkout",
+        json={"items": [{"variant_id": seed_data["variant_id"], "quantity": 1}]},
+        headers={**buyer_headers, "Idempotency-Key": "zero-variant-price"},
+    )
+
+    assert response.status_code == 400
+    assert "price greater than zero" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_checkout_multi_merchant_two_merchants(
     client: AsyncClient, buyer_headers: dict, seed_data: dict, db
 ):

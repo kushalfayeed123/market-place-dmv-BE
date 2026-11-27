@@ -144,6 +144,22 @@ class OrderServiceImpl(OrderService):
                     f"Only one copy of '{product.title}' can be ordered (digital/service product)"
                 )
 
+            unit_price = (
+                variant.price_override_amount
+                if variant.price_override_amount is not None
+                else product.base_price_amount
+            )
+            if unit_price <= 0:
+                raise ValueError(
+                    f"'{product.title}' must have a current price greater than zero before checkout."
+                )
+            currency = (
+                variant.price_override_currency
+                if variant.price_override_amount is not None
+                and variant.price_override_currency is not None
+                else product.base_price_currency
+            )
+
             # Check inventory if tracked
             if variant.inventory_policy == "tracked":
                 result = await self._db.execute(
@@ -160,9 +176,7 @@ class OrderServiceImpl(OrderService):
                 inventory.quantity_available -= cart_item.quantity
                 inventory.quantity_reserved += cart_item.quantity
 
-            # Calculate price
-            unit_price = variant.price_override_amount or product.base_price_amount
-            currency = variant.price_override_currency or product.base_price_currency
+            # Calculate the order total from the latest persisted product/variant data.
             cart_currencies.add(currency.upper())
             line_total = unit_price * cart_item.quantity
             order_total += line_total
